@@ -29,6 +29,18 @@ async function fetchSearchImageUrls() {
       for (const imgUrl of results) {
         if (!imgUrl) continue;
         if (!imgUrl.startsWith('http')) continue;
+        
+        const lowerUrl = imgUrl.toLowerCase();
+        const skipKeywords = [
+          'no_goods_pic', 'default_pic', 'default.png', 'no_image', 'placeholder', 'blank', 
+          'no-image', 'default-image', 'notfound', 'not-found', 'pixel.gif', 'spacer.gif',
+          'products/default'
+        ];
+        if (skipKeywords.some(kw => lowerUrl.includes(kw))) {
+          console.log(`[Skipping] URL matches placeholder/default keyword: ${imgUrl}`);
+          continue;
+        }
+        
         if (!urls.includes(imgUrl)) {
           urls.push(imgUrl);
         }
@@ -233,13 +245,17 @@ async function run() {
               const ctx = canvas.getContext('2d');
               ctx.drawImage(img, 0, 0, w, h);
               
-              const resizedImg = new Image();
+               const resizedImg = new Image();
               resizedImg.onload = () => {
                 try {
                   const res = window.autoCalibrateAndWarp(resizedImg, 50);
-                  resolve({ success: true, url: res.fullDataUrl });
+                  if (res && res.fullDataUrl) {
+                    resolve({ success: true, url: res.fullDataUrl });
+                  } else {
+                    resolve({ success: false, error: 'Calibration returned null' });
+                  }
                 } catch (e) {
-                  resolve({ success: false, error: e.toString() });
+                  resolve({ success: false, error: e.message || e.toString() });
                 }
               };
               resizedImg.onerror = () => resolve({ success: false, error: 'Resized image load failed' });

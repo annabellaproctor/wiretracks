@@ -315,112 +315,126 @@ async function run() {
           }
         }
         
-        // Find boundary points of the blue PCB mask
-        const boundaryPoints = [];
-        const pad = 5;
-        for (let y = pad; y < h - pad; y++) {
-          for (let x = pad; x < w - pad; x++) {
-            if (boardMask[y * w + x] === 0) continue;
-            
-            const leftVal = boardMask[y * w + x - 1];
-            const rightVal = boardMask[y * w + x + 1];
-            const upVal = boardMask[(y - 1) * w + x];
-            const downVal = boardMask[(y + 1) * w + x];
-            
-            if (leftVal === 0 || rightVal === 0 || upVal === 0 || downVal === 0) {
-              boundaryPoints.push({ x, y });
+        let tlPt = null, trPt = null, blPt = null, brPt = null;
+        let tlShrunk = null, trShrunk = null, blShrunk = null, brShrunk = null;
+        
+        if (boardAreaRatio > 0.92) {
+          console.log("Board occupies almost the entire image (ratio: " + boardAreaRatio.toFixed(3) + "). Bypassing perspective warp.");
+          tlPt = { x: 0, y: 0 };
+          trPt = { x: w - 1, y: 0 };
+          blPt = { x: 0, y: h - 1 };
+          brPt = { x: w - 1, y: h - 1 };
+          tlShrunk = tlPt;
+          trShrunk = trPt;
+          blShrunk = blPt;
+          brShrunk = brPt;
+        } else {
+          // Find boundary points of the blue PCB mask
+          const boundaryPoints = [];
+          const pad = 5;
+          for (let y = pad; y < h - pad; y++) {
+            for (let x = pad; x < w - pad; x++) {
+              if (boardMask[y * w + x] === 0) continue;
+              
+              const leftVal = boardMask[y * w + x - 1];
+              const rightVal = boardMask[y * w + x + 1];
+              const upVal = boardMask[(y - 1) * w + x];
+              const downVal = boardMask[(y + 1) * w + x];
+              
+              if (leftVal === 0 || rightVal === 0 || upVal === 0 || downVal === 0) {
+                boundaryPoints.push({ x, y });
+              }
             }
           }
-        }
-        
-        if (boundaryPoints.length < 4) {
-          throw new Error("No PCB boundary points detected!");
-        }
-        
-        // Find optimal box orientation for the blue PCB
-        let minArea = Infinity;
-        let bestTheta = 0;
-        
-        for (let theta = 0; theta < 90; theta += 0.5) {
-          const rad = (theta * Math.PI) / 180;
+          
+          if (boundaryPoints.length < 4) {
+            throw new Error("No PCB boundary points detected!");
+          }
+          
+          // Find optimal box orientation for the blue PCB
+          let minArea = Infinity;
+          let bestTheta = 0;
+          
+          for (let theta = 0; theta < 90; theta += 0.5) {
+            const rad = (theta * Math.PI) / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+            
+            const step = Math.max(1, Math.round(boundaryPoints.length / 500));
+            for (let i = 0; i < boundaryPoints.length; i += step) {
+              const p = boundaryPoints[i];
+              const rx = p.x * cos - p.y * sin;
+              const ry = p.x * sin + p.y * cos;
+              
+              if (rx < minX) minX = rx;
+              if (rx > maxX) maxX = rx;
+              if (ry < minY) minY = ry;
+              if (ry > maxY) maxY = ry;
+            }
+            
+            const area = (maxX - minX) * (maxY - minY);
+            if (area < minArea) {
+              minArea = area;
+              bestTheta = theta;
+            }
+          }
+          
+          console.log("Optimal Box Angle:", bestTheta);
+          
+          // Find 4 vertices of the blue PCB
+          const rad = (bestTheta * Math.PI) / 180;
           const cos = Math.cos(rad);
           const sin = Math.sin(rad);
           
-          let minX = Infinity, maxX = -Infinity;
-          let minY = Infinity, maxY = -Infinity;
+          let minTL = Infinity, minBL = Infinity, maxTR = -Infinity, maxBR = -Infinity;
           
-          const step = Math.max(1, Math.round(boundaryPoints.length / 500));
-          for (let i = 0; i < boundaryPoints.length; i += step) {
+          for (let i = 0; i < boundaryPoints.length; i++) {
             const p = boundaryPoints[i];
             const rx = p.x * cos - p.y * sin;
             const ry = p.x * sin + p.y * cos;
             
-            if (rx < minX) minX = rx;
-            if (rx > maxX) maxX = rx;
-            if (ry < minY) minY = ry;
-            if (ry > maxY) maxY = ry;
+            const scoreTL = rx + ry;
+            if (scoreTL < minTL) {
+              minTL = scoreTL;
+              tlPt = p;
+            }
+            const scoreBL = rx - ry;
+            if (scoreBL < minBL) {
+              minBL = scoreBL;
+              blPt = p;
+            }
+            const scoreTR = rx - ry;
+            if (scoreTR > maxTR) {
+              maxTR = scoreTR;
+              trPt = p;
+            }
+            const scoreBR = rx + ry;
+            if (scoreBR > maxBR) {
+              maxBR = scoreBR;
+              brPt = p;
+            }
           }
           
-          const area = (maxX - minX) * (maxY - minY);
-          if (area < minArea) {
-            minArea = area;
-            bestTheta = theta;
-          }
-        }
-        
-        console.log("Optimal Box Angle:", bestTheta);
-        
-        // Find 4 vertices of the blue PCB
-        const rad = (bestTheta * Math.PI) / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-        
-        let tlPt = null, trPt = null, blPt = null, brPt = null;
-        let minTL = Infinity, minBL = Infinity, maxTR = -Infinity, maxBR = -Infinity;
-        
-        for (let i = 0; i < boundaryPoints.length; i++) {
-          const p = boundaryPoints[i];
-          const rx = p.x * cos - p.y * sin;
-          const ry = p.x * sin + p.y * cos;
+          // Expand PCB corners slightly outwards (~0.7%) so it shows the edge
+          const cx = (tlPt.x + trPt.x + blPt.x + brPt.x) / 4;
+          const cy = (tlPt.y + trPt.y + blPt.y + brPt.y) / 4;
+          const shrinkFactor = -0.007;
           
-          const scoreTL = rx + ry;
-          if (scoreTL < minTL) {
-            minTL = scoreTL;
-            tlPt = p;
-          }
-          const scoreBL = rx - ry;
-          if (scoreBL < minBL) {
-            minBL = scoreBL;
-            blPt = p;
-          }
-          const scoreTR = rx - ry;
-          if (scoreTR > maxTR) {
-            maxTR = scoreTR;
-            trPt = p;
-          }
-          const scoreBR = rx + ry;
-          if (scoreBR > maxBR) {
-            maxBR = scoreBR;
-            brPt = p;
-          }
-        }
-        
-        // Expand PCB corners slightly outwards (~0.7%) so it shows the edge
-        const cx = (tlPt.x + trPt.x + blPt.x + brPt.x) / 4;
-        const cy = (tlPt.y + trPt.y + blPt.y + brPt.y) / 4;
-        const shrinkFactor = -0.007;
-        
-        const shrinkCorner = (p) => {
-          return {
-            x: Math.round(p.x + (cx - p.x) * shrinkFactor),
-            y: Math.round(p.y + (cy - p.y) * shrinkFactor)
+          const shrinkCorner = (p) => {
+            return {
+              x: Math.round(p.x + (cx - p.x) * shrinkFactor),
+              y: Math.round(p.y + (cy - p.y) * shrinkFactor)
+            };
           };
-        };
-        
-        const tlShrunk = shrinkCorner(tlPt);
-        const trShrunk = shrinkCorner(trPt);
-        const blShrunk = shrinkCorner(blPt);
-        const brShrunk = shrinkCorner(brPt);
+          
+          tlShrunk = shrinkCorner(tlPt);
+          trShrunk = shrinkCorner(trPt);
+          blShrunk = shrinkCorner(blPt);
+          brShrunk = shrinkCorner(brPt);
+        }
         
         // Restore opacity inside PCB polygon to prevent transparent holes in labels/chips
         for (let y = 0; y < h; y++) {
@@ -640,15 +654,24 @@ async function run() {
         // --- PASS 7: Crop to Peripheral Bounds ---
         // Find the bounding box of all active foreground pixels in the warped image
         const finalFullWarpedCtx = finalFullWarped.getContext('2d', { willReadFrequently: true });
-        const finalFullData = finalFullWarpedCtx.getImageData(0, 0, fullW, fullH).data;
+        const finalFullImageData = finalFullWarpedCtx.getImageData(0, 0, fullW, fullH);
+        const finalFullData = finalFullImageData.data;
         
         let activeMinU = fullW, activeMaxU = 0;
         let activeMinV = fullH, activeMaxV = 0;
         let hasActive = false;
         
+        const boardLeft = Math.round(-minU);
+        const boardTop = Math.round(-minV);
+        const boardRight = boardLeft + outW;
+        const boardBottom = boardTop + outH;
+        
         for (let v = 0; v < fullH; v++) {
           for (let u = 0; u < fullW; u++) {
             const idx = (v * fullW + u) * 4;
+            if (u < boardLeft || u >= boardRight || v < boardTop || v >= boardBottom) {
+              finalFullData[idx+3] = 0; // Make pixels outside the board boundary transparent
+            }
             if (finalFullData[idx+3] >= 50) { // Active pixel (not transparent)
               if (u < activeMinU) activeMinU = u;
               if (u > activeMaxU) activeMaxU = u;
@@ -658,6 +681,8 @@ async function run() {
             }
           }
         }
+        
+        finalFullWarpedCtx.putImageData(finalFullImageData, 0, 0);
         
         if (!hasActive) {
           activeMinU = 0; activeMaxU = fullW - 1;

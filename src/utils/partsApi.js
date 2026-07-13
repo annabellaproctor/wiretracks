@@ -320,64 +320,77 @@ export async function searchPartsUnified(query, provider = 'all') {
 
   try {
     if (provider === 'all') {
-      const searchPromises = [
+      // Tier 1: Largest, cheapest, public, good-enough providers
+      const tier1Promises = [
         searchEasyEDAParts(query),
         searchLCSCParts(query),
-        fetchWikipediaSummary(query),
-        searchMouserParts(query),
-        searchDigiKeyParts(query),
-        searchLCSCOfficialAPI(query),
         searchJLCPartCode(query)
       ];
 
-      // Add Amazon query to unified search if SerpApi is configured
-      if (serpapiKey) {
-        searchPromises.push(searchAmazonParts(query));
-      }
+      const tier1Results = await Promise.all(tier1Promises);
+      const [easyeda, lcsc, jlc] = tier1Results;
 
-      // Add DataForSEO query if configured
-      if (dataforseoLogin) {
-        searchPromises.push(searchDataForSEO(query));
-      }
+      const totalTier1Results = (easyeda?.length || 0) + (lcsc?.length || 0) + (jlc?.length || 0);
+      const anyTier1Failed = !easyeda || !lcsc || !jlc;
 
-      // Add Google Merchant API query if configured
-      if (googleMerchantId && saEmail && saPrivateKey) {
-        searchPromises.push(searchGoogleMerchantAPI(query));
-      }
+      if (totalTier1Results > 0 && !anyTier1Failed) {
+        // Tier 1 succeeded and returned component matches!
+        if (easyeda) results.push(...easyeda);
+        if (lcsc) results.push(...lcsc);
+        if (jlc) results.push(...jlc);
+      } else {
+        // Fallback Tier 2: Query Mouser, DigiKey, Official LCSC API, and other premium/configured providers
+        console.log("[searchPartsUnified] Tier 1 rate-limited, failed, or returned zero results. Querying Tier 2 providers...");
+        
+        const tier2Promises = [
+          searchLCSCOfficialAPI(query),
+          searchDigiKeyParts(query),
+          searchMouserParts(query),
+          fetchWikipediaSummary(query)
+        ];
 
-      const searchResults = await Promise.all(searchPromises);
-      const [easyeda, lcsc, wiki, mouser, digikey, lcscOfficial, jlc] = searchResults;
+        if (serpapiKey) tier2Promises.push(searchAmazonParts(query));
+        if (dataforseoLogin) tier2Promises.push(searchDataForSEO(query));
+        if (googleMerchantId && saEmail && saPrivateKey) {
+          tier2Promises.push(searchGoogleMerchantAPI(query));
+        }
 
-      if (lcscOfficial && lcscOfficial.length > 0) results.push(...lcscOfficial);
-      if (digikey && digikey.length > 0) results.push(...digikey);
-      if (mouser && mouser.length > 0) results.push(...mouser);
-      if (lcsc && lcsc.length > 0) results.push(...lcsc);
-      if (easyeda && easyeda.length > 0) results.push(...easyeda);
-      if (jlc && jlc.length > 0) results.push(...jlc);
+        const tier2Results = await Promise.all(tier2Promises);
+        const [lcscOfficial, digikey, mouser, wiki] = tier2Results;
 
-      let nextIdx = 7;
-      if (serpapiKey) {
-        const amazon = searchResults[nextIdx++];
-        if (amazon && amazon.length > 0) results.push(...amazon);
-      }
-      if (dataforseoLogin) {
-        const dataforseo = searchResults[nextIdx++];
-        if (dataforseo && dataforseo.length > 0) results.push(...dataforseo);
-      }
-      if (googleMerchantId && saEmail && saPrivateKey) {
-        const googleMerchant = searchResults[nextIdx++];
-        if (googleMerchant && googleMerchant.length > 0) results.push(...googleMerchant);
-      }
+        if (lcscOfficial) results.push(...lcscOfficial);
+        if (digikey) results.push(...digikey);
+        if (mouser) results.push(...mouser);
+        
+        // Include any remaining Tier 1 results
+        if (easyeda) results.push(...easyeda);
+        if (lcsc) results.push(...lcsc);
+        if (jlc) results.push(...jlc);
 
-      // Enrich with Wikipedia summaries
-      if (wiki && wiki.summary) {
-        results.forEach(part => {
-          const checkStr = wiki.title.toLowerCase();
-          if (part.partNumber.toLowerCase().includes(checkStr) || checkStr.includes(part.partNumber.toLowerCase())) {
-            part.description = `${wiki.summary} | ${part.description}`;
-            if (!part.image) part.image = wiki.thumbnail;
-          }
-        });
+        let nextIdx = 4;
+        if (serpapiKey) {
+          const amazon = tier2Results[nextIdx++];
+          if (amazon) results.push(...amazon);
+        }
+        if (dataforseoLogin) {
+          const dataforseo = tier2Results[nextIdx++];
+          if (dataforseo) results.push(...dataforseo);
+        }
+        if (googleMerchantId && saEmail && saPrivateKey) {
+          const googleMerchant = tier2Results[nextIdx++];
+          if (googleMerchant) results.push(...googleMerchant);
+        }
+
+        // Enrich with Wikipedia summaries
+        if (wiki && wiki.summary) {
+          results.forEach(part => {
+            const checkStr = wiki.title.toLowerCase();
+            if (part.partNumber.toLowerCase().includes(checkStr) || checkStr.includes(part.partNumber.toLowerCase())) {
+              part.description = `${wiki.summary} | ${part.description}`;
+              if (!part.image) part.image = wiki.thumbnail;
+            }
+          });
+        }
       }
     } else if (provider === 'lcsc_official') {
       const lcscOfficial = await searchLCSCOfficialAPI(query);

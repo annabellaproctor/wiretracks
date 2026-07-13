@@ -96,16 +96,34 @@ const processImageBackground = (img, tolerance = 20, doCrop = true, deskewAngle 
     const imgData = workingCtx.getImageData(0, 0, workingCanvas.width, workingCanvas.height);
     const data = imgData.data;
     
-    // Get baseline corner color from preCropCanvas top-left pixel BEFORE rotation
-    const baseCanvas = document.createElement('canvas');
-    baseCanvas.width = 1;
-    baseCanvas.height = 1;
-    const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
-    baseCtx.drawImage(preCropCanvas, Math.min(5, cropW - 1), Math.min(5, cropH - 1), 1, 1, 0, 0, 1, 1);
-    const rawCorner = baseCtx.getImageData(0, 0, 1, 1).data;
-    const bgR = rawCorner[0];
-    const bgG = rawCorner[1];
-    const bgB = rawCorner[2];
+    // Robust perimeter background sampling (immune to local border/text noise)
+    const preCropImgData = preCropCtx.getImageData(0, 0, cropW, cropH);
+    const preCropPixels = preCropImgData.data;
+    
+    let sumR = 0, sumG = 0, sumB = 0, sumCount = 0;
+    const edgePad = Math.max(2, Math.round(Math.min(cropW, cropH) * 0.02));
+    
+    // Sample top and bottom rows
+    for (let x = edgePad; x < cropW - edgePad; x += Math.max(1, Math.round(cropW / 30))) {
+      const idxTop = (edgePad * cropW + x) * 4;
+      const idxBot = ((cropH - edgePad - 1) * cropW + x) * 4;
+      sumR += preCropPixels[idxTop] + preCropPixels[idxBot];
+      sumG += preCropPixels[idxTop+1] + preCropPixels[idxBot+1];
+      sumB += preCropPixels[idxTop+2] + preCropPixels[idxBot+2];
+      sumCount += 2;
+    }
+    // Sample left and right columns
+    for (let y = edgePad; y < cropH - edgePad; y += Math.max(1, Math.round(cropH / 30))) {
+      const idxLeft = (y * cropW + edgePad) * 4;
+      const idxRight = (y * cropW + cropW - edgePad - 1) * 4;
+      sumR += preCropPixels[idxLeft] + preCropPixels[idxRight];
+      sumG += preCropPixels[idxLeft+1] + preCropPixels[idxRight+1];
+      sumB += preCropPixels[idxLeft+2] + preCropPixels[idxRight+2];
+      sumCount += 2;
+    }
+    const bgR = sumCount > 0 ? Math.round(sumR / sumCount) : 255;
+    const bgG = sumCount > 0 ? Math.round(sumG / sumCount) : 255;
+    const bgB = sumCount > 0 ? Math.round(sumB / sumCount) : 255;
     
     if (tolerance > 0) {
       for (let i = 0; i < data.length; i += 4) {
@@ -230,6 +248,20 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
       }
     }
     
+    // Early exit check: if rough alignment has very low variance, it is likely not a board/headers drawing
+    if (maxVariance < 150) {
+      console.log("[autoCalibrateImageSkin] Low rough variance, aborting early:", maxVariance);
+      return {
+        deskewAngle: 0,
+        taperFactor: 0,
+        shearFactor: 0,
+        subCropX: 0, subCropY: 0, subCropW: 100, subCropH: 100,
+        startMargin: 12, endMargin: 88,
+        confidence: Math.min(15, Math.round(maxVariance / 10)),
+        lowQuality: true
+      };
+    }
+    
     // --- PASS 2: Fine search around bestAngle (-4 to +4 in 0.5-degree steps) ---
     let fineBestAngle = bestAngle;
     for (let angle = bestAngle - 4; angle <= bestAngle + 4; angle += 0.5) {
@@ -291,16 +323,34 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
     let rotData = deskewedCtx.getImageData(0, 0, rotW, rotH);
     let rotPixels = rotData.data;
     
-    const baseCanvas = document.createElement('canvas');
-    baseCanvas.width = 1;
-    baseCanvas.height = 1;
-    const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
-    baseCtx.drawImage(img, 5, 5, 5, 5, 0, 0, 1, 1);
-    const baseCorner = baseCtx.getImageData(0, 0, 1, 1).data;
-    const bgR = baseCorner[0];
-    const bgG = baseCorner[1];
-    const bgB = baseCorner[2];
-    const bgA = baseCorner[3];
+    // Robust perimeter background sampling (immune to local border/text noise)
+    let sumR = 0, sumG = 0, sumB = 0, sumA = 0, sumCount = 0;
+    const edgePad = Math.max(2, Math.round(Math.min(rotW, rotH) * 0.02));
+    
+    // Sample top and bottom rows
+    for (let x = edgePad; x < rotW - edgePad; x += Math.max(1, Math.round(rotW / 30))) {
+      const idxTop = (edgePad * rotW + x) * 4;
+      const idxBot = ((rotH - edgePad - 1) * rotW + x) * 4;
+      sumR += rotPixels[idxTop] + rotPixels[idxBot];
+      sumG += rotPixels[idxTop+1] + rotPixels[idxBot+1];
+      sumB += rotPixels[idxTop+2] + rotPixels[idxBot+2];
+      sumA += rotPixels[idxTop+3] + rotPixels[idxBot+3];
+      sumCount += 2;
+    }
+    // Sample left and right columns
+    for (let y = edgePad; y < rotH - edgePad; y += Math.max(1, Math.round(rotH / 30))) {
+      const idxLeft = (y * rotW + edgePad) * 4;
+      const idxRight = (y * rotW + rotW - edgePad - 1) * 4;
+      sumR += rotPixels[idxLeft] + rotPixels[idxRight];
+      sumG += rotPixels[idxLeft+1] + rotPixels[idxRight+1];
+      sumB += rotPixels[idxLeft+2] + rotPixels[idxRight+2];
+      sumA += rotPixels[idxLeft+3] + rotPixels[idxRight+3];
+      sumCount += 2;
+    }
+    const bgR = sumCount > 0 ? Math.round(sumR / sumCount) : 255;
+    const bgG = sumCount > 0 ? Math.round(sumG / sumCount) : 255;
+    const bgB = sumCount > 0 ? Math.round(sumB / sumCount) : 255;
+    const bgA = sumCount > 0 ? Math.round(sumA / sumCount) : 255;
     const isBgTransparent = bgA < 50;
     console.log("[autoCalibrateImageSkin] Detected background color:", bgR, bgG, bgB, "Alpha:", bgA, "Transparent:", isBgTransparent);
     
@@ -686,7 +736,8 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
       subCropW: subCrop.w,
       subCropH: subCrop.h,
       startMargin: Math.max(1, startMargin),
-      endMargin: Math.min(99, endMargin)
+      endMargin: Math.min(99, endMargin),
+      confidence: Math.min(100, Math.round((maxFineVariance || 0) / 100))
     };
   } catch (err) {
     console.error("[autoCalibrateImageSkin] failed:", err);
@@ -827,6 +878,7 @@ export default function SchematicCanvas({
   const [spacePressed, setSpacePressed] = useState(false);
   const [contextMenu, setContextMenu] = useState(null); 
   const [skinPicker, setSkinPicker] = useState(null); // { compId, partNumber, images: [], selectedUrl: '', customUrl: '', loading: false }
+  const [visibleCount, setVisibleCount] = useState(12);
 
   const imageCache = useRef({});
   const previewCanvasRef = useRef(null);
@@ -880,7 +932,7 @@ export default function SchematicCanvas({
         const flipH = skinPicker.flipH || false;
         const flipV = skinPicker.flipV || false;
         const rot = skinPicker.rotation || 0;
-        const aspect = skinPicker.aspect || 'fit';
+        const aspect = skinPicker.aspect || 'stretch';
         
         if (flipH) ctx.scale(-1, 1);
         if (flipV) ctx.scale(1, -1);
@@ -1611,7 +1663,7 @@ export default function SchematicCanvas({
             
             cachedImg.onload = () => {
               console.log(`[Onload Calibration Check] comp: ${comp.id}, imageDeskew: ${comp.imageDeskew}, imageTaper: ${comp.imageTaper}, imageShear: ${comp.imageShear}, imageSubCropW: ${comp.imageSubCropW}`);
-              if (comp.imageDeskew === undefined || comp.imageTaper === undefined || comp.imageShear === undefined || comp.imageSubCropW === undefined || comp.imageSubCropW === 100) {
+              if (!comp.rawImage && (comp.imageDeskew === undefined || comp.imageTaper === undefined || comp.imageShear === undefined || comp.imageSubCropW === undefined || comp.imageSubCropW === 100)) {
                 console.log(`[Onload Calibration Run] Running autoCalibrateImageSkin for comp: ${comp.id}...`);
                 const cal = autoCalibrateImageSkin(cachedImg, tolerance);
                 console.log(`[Onload Calibration Done] Result:`, cal);
@@ -1726,7 +1778,7 @@ export default function SchematicCanvas({
             imageCache.current[cacheKey] = cachedImg;
           }
           if (cachedImg.complete && cachedImg.naturalWidth !== 0) {
-            if ((comp.imageDeskew === undefined || comp.imageTaper === undefined || comp.imageShear === undefined) && !cachedImg._calibrating) {
+            if (!comp.rawImage && (comp.imageDeskew === undefined || comp.imageTaper === undefined || comp.imageShear === undefined) && !cachedImg._calibrating) {
               cachedImg._calibrating = true;
               const imgToCal = cachedImg;
               setTimeout(() => {
@@ -1866,7 +1918,7 @@ export default function SchematicCanvas({
               const flipH = comp.imageFlipH || false;
               const flipV = comp.imageFlipV || false;
               const rot = comp.imageRotation || 0;
-              const aspect = comp.imageAspect || 'fit';
+              const aspect = comp.imageAspect || 'stretch';
               
               if (flipH) ctx.scale(-1, 1);
               if (flipV) ctx.scale(1, -1);
@@ -2808,10 +2860,10 @@ export default function SchematicCanvas({
       compId,
       partNumber: comp.label || comp.partNumber || comp.name,
       searchQuery: comp.label && !comp.label.match(/^C\d+$/i) ? comp.label : (comp.partNumber || comp.name),
-      images: comp.image ? [comp.image] : [],
-      selectedUrl: comp.image || '',
+      images: comp.rawImage ? [comp.rawImage] : (comp.image ? [comp.image] : []),
+      selectedUrl: comp.rawImage || comp.image || '',
       customUrl: '',
-      tolerance: comp.imageTolerance !== undefined ? comp.imageTolerance : 20,
+      tolerance: comp.rawTolerance !== undefined ? comp.rawTolerance : (comp.imageTolerance !== undefined ? comp.imageTolerance : 20),
       doCrop: comp.imageCrop !== undefined ? comp.imageCrop : true,
       width: comp.width || 120,
       height: comp.height || 300,
@@ -2822,10 +2874,15 @@ export default function SchematicCanvas({
       flipH: comp.imageFlipH || false,
       flipV: comp.imageFlipV || false,
       opacity: comp.imageOpacity !== undefined ? comp.imageOpacity : 0.3,
-      aspect: comp.imageAspect || 'fit',
+      aspect: comp.imageAspect || 'stretch',
       pinOffsets,
       loading: false,
-      lastLoadedUrl: comp.image || ''
+      lastLoadedUrl: comp.rawImage || comp.image || '',
+      deskewAngle: comp.rawDeskewAngle !== undefined ? comp.rawDeskewAngle : (comp.imageDeskew || 0),
+      subCropX: comp.rawSubCropX !== undefined ? comp.rawSubCropX : (comp.imageSubCropX || 0),
+      subCropY: comp.rawSubCropY !== undefined ? comp.rawSubCropY : (comp.imageSubCropY || 0),
+      subCropW: comp.rawSubCropW !== undefined ? comp.rawSubCropW : (comp.imageSubCropW || 100),
+      subCropH: comp.rawSubCropH !== undefined ? comp.rawSubCropH : (comp.imageSubCropH || 100)
     });
   };
 
@@ -2862,9 +2919,9 @@ export default function SchematicCanvas({
           partNumber: comp.label || comp.partNumber || comp.name,
           searchQuery: query,
           images: [],
-          selectedUrl: comp.image || '',
+          selectedUrl: comp.rawImage || comp.image || '',
           customUrl: '',
-          tolerance: comp.imageTolerance !== undefined ? comp.imageTolerance : 20,
+          tolerance: comp.rawTolerance !== undefined ? comp.rawTolerance : (comp.imageTolerance !== undefined ? comp.imageTolerance : 20),
           doCrop: comp.imageCrop !== undefined ? comp.imageCrop : true,
           width: comp.width || 120,
           height: comp.height || 300,
@@ -2875,13 +2932,13 @@ export default function SchematicCanvas({
           flipH: comp.imageFlipH || false,
           flipV: comp.imageFlipV || false,
           opacity: comp.imageOpacity !== undefined ? comp.imageOpacity : 0.3,
-          aspect: comp.imageAspect || 'fit',
+          aspect: comp.imageAspect || 'stretch',
           pinOffsets,
-          deskewAngle: comp.imageDeskew !== undefined ? comp.imageDeskew : 0,
-          subCropX: comp.imageSubCropX !== undefined ? comp.imageSubCropX : 0,
-          subCropY: comp.imageSubCropY !== undefined ? comp.imageSubCropY : 0,
-          subCropW: comp.imageSubCropW !== undefined ? comp.imageSubCropW : 100,
-          subCropH: comp.imageSubCropH !== undefined ? comp.imageSubCropH : 100,
+          deskewAngle: comp.rawDeskewAngle !== undefined ? comp.rawDeskewAngle : (comp.imageDeskew || 0),
+          subCropX: comp.rawSubCropX !== undefined ? comp.rawSubCropX : (comp.imageSubCropX || 0),
+          subCropY: comp.rawSubCropY !== undefined ? comp.rawSubCropY : (comp.imageSubCropY || 0),
+          subCropW: comp.rawSubCropW !== undefined ? comp.rawSubCropW : (comp.imageSubCropW || 100),
+          subCropH: comp.rawSubCropH !== undefined ? comp.rawSubCropH : (comp.imageSubCropH || 100),
           loading: true
         };
       }
@@ -3358,30 +3415,77 @@ export default function SchematicCanvas({
                     </div>
                   ) : (
                     <>
+                      {/* 📋 Visual Candidate Selection Guide */}
+                      <div className="space-y-1.5 border-b border-slate-100 pb-3">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">📋 PCB PHOTO SELECTION GUIDE</span>
+                        <svg viewBox="0 0 420 120" className="w-full bg-slate-50 border border-slate-100 rounded-xl p-1.5">
+                          {/* Good Candidate Card */}
+                          <g transform="translate(5, 5)">
+                            <rect width="195" height="110" rx="8" fill="#f0fdf4" stroke="#bbf7d0" strokeWidth="1" />
+                            <text x="10" y="18" fill="#15803d" fontSize="9" fontWeight="bold" fontFamily="sans-serif">✓ GOOD MATCH (Flat Crop)</text>
+                            
+                            {/* Flat Orthogonal Board */}
+                            <rect x="15" y="28" width="55" height="35" rx="3" fill="#166534" />
+                            <rect x="25" y="38" width="35" height="15" rx="1" fill="#15803d" />
+                            <line x1="15" y1="38" x2="15" y2="52" stroke="#eab308" strokeWidth="2" strokeDasharray="2,2" />
+                            <line x1="70" y1="38" x2="70" y2="52" stroke="#eab308" strokeWidth="2" strokeDasharray="2,2" />
+                            
+                            <text x="80" y="38" fill="#14532d" fontSize="8" fontWeight="bold" fontFamily="sans-serif">Flat Orthogonal</text>
+                            <text x="80" y="50" fill="#166534" fontSize="8" fontFamily="sans-serif">• Solid color backdrops</text>
+                            <text x="80" y="62" fill="#166534" fontSize="8" fontFamily="sans-serif">• Clear header grids</text>
+                            <text x="80" y="74" fill="#166534" fontSize="8" fontFamily="sans-serif">• High edge contrast</text>
+                          </g>
+
+                          {/* Bad Candidate Card */}
+                          <g transform="translate(210, 5)">
+                            <rect width="200" height="110" rx="8" fill="#fef2f2" stroke="#fecaca" strokeWidth="1" />
+                            <text x="10" y="18" fill="#b91c1c" fontSize="9" fontWeight="bold" fontFamily="sans-serif">✗ BAD MATCH (Skew/Noise)</text>
+                            
+                            {/* Perspective / Shadow Board */}
+                            <g transform="translate(15, 30) skewX(-15) scale(1, 0.7)">
+                              <rect x="0" y="0" width="50" height="30" rx="2" fill="#7f1d1d" />
+                            </g>
+                            {/* Curved wire/hand line */}
+                            <path d="M 12,68 C 22,60 32,75 52,58" fill="none" stroke="#dc2626" strokeWidth="1.5" />
+                            
+                            <text x="80" y="38" fill="#7f1d1d" fontSize="8" fontWeight="bold" fontFamily="sans-serif">Perspective Skew</text>
+                            <text x="80" y="50" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Wires, tables, shadows</text>
+                            <text x="80" y="62" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Render axes/ledges</text>
+                            <text x="80" y="74" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Hand/fingers in frame</text>
+                          </g>
+                        </svg>
+                        <p className="text-[9px] text-slate-500 bg-slate-50 border border-slate-200/60 p-2 rounded-lg mt-2 leading-relaxed">
+                          👉 <b>How to pick:</b> Select a photo that is flat, straight, and has a solid clean background. Avoid images with shadows, angles, wires, or programmers.
+                        </p>
+                      </div>
+
                       {skinPicker.images.length === 0 ? (
                         <div className="text-center py-6 text-slate-400 text-xs bg-slate-50 rounded-xl border border-dashed border-slate-200">
                           No search results found for this query.
                         </div>
                       ) : (
-                        <div className="space-y-2">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Search Results (Pick one):</span>
-                          <div className="grid grid-cols-3 gap-2">
-                            {skinPicker.images.map((url, idx) => {
+                        <div className="space-y-3">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Search Results (Click to Pick & Calibrate):</span>
+                          <div className="grid grid-cols-4 gap-2">
+                            {skinPicker.images.slice(0, visibleCount).map((url, idx) => {
                               const isSelected = skinPicker.selectedUrl === url;
                               return (
                                 <button
                                   key={idx}
-                                  onClick={() => setSkinPicker(prev => ({ ...prev, selectedUrl: url }))}
-                                  className={`relative aspect-square bg-slate-50 rounded-xl border-2 overflow-hidden hover:scale-[1.03] active:scale-[0.98] transition-all ${
+                                  onClick={() => setSkinPicker(prev => ({ ...prev, selectedUrl: url, customUrl: '' }))}
+                                  className={`relative aspect-square bg-slate-50 rounded-xl border-2 overflow-hidden hover:scale-[1.03] active:scale-[0.98] transition-all flex flex-col items-center justify-center p-1 ${
                                     isSelected ? 'border-indigo-600 shadow-md ring-2 ring-indigo-500/10' : 'border-slate-200 hover:border-slate-300'
                                   }`}
                                 >
                                   <img 
                                     src={url.startsWith('data:') ? url : `/api/proxy-image?url=${encodeURIComponent(url)}`} 
                                     alt={`Result ${idx}`} 
-                                    className="w-full h-full object-contain p-1"
+                                    className="w-full h-full object-contain"
                                     onError={(e) => {
                                       e.target.style.display = 'none';
+                                    }}
+                                    onLoad={(e) => {
+                                      e.target.style.display = 'block';
                                     }}
                                   />
                                   {isSelected && (
@@ -3393,6 +3497,15 @@ export default function SchematicCanvas({
                               );
                             })}
                           </div>
+                          
+                          {skinPicker.images.length > visibleCount && (
+                            <button
+                              onClick={() => setVisibleCount(prev => prev + 12)}
+                              className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-semibold tracking-wide transition-all mt-2 active:scale-[0.98]"
+                            >
+                              + Load More Options ({skinPicker.images.length - visibleCount} remaining)
+                            </button>
+                          )}
                         </div>
                       )}
 
@@ -3593,67 +3706,45 @@ export default function SchematicCanvas({
                         />
                       </div>
 
-                      {/* Sub-Region Isolation Controls */}
-                      <div className="space-y-2 border-b border-slate-100 pb-2 bg-slate-50/50 p-2.5 rounded-lg border border-slate-100">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">✂️ Sub-Region Isolation (Bulk Packs / Accessories)</span>
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>CROP LEFT X:</span>
-                              <span className="text-indigo-600">{skinPicker.subCropX || 0}%</span>
-                            </div>
-                            <input 
-                              type="range"
-                              min="0"
-                              max="90"
-                              value={skinPicker.subCropX || 0}
-                              onChange={(e) => setSkinPicker(prev => ({ ...prev, subCropX: Number(e.target.value) }))}
-                              className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>CROP TOP Y:</span>
-                              <span className="text-indigo-600">{skinPicker.subCropY || 0}%</span>
-                            </div>
-                            <input 
-                              type="range"
-                              min="0"
-                              max="90"
-                              value={skinPicker.subCropY || 0}
-                              onChange={(e) => setSkinPicker(prev => ({ ...prev, subCropY: Number(e.target.value) }))}
-                              className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>CROP WIDTH:</span>
-                              <span className="text-indigo-600">{skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100}%</span>
-                            </div>
-                            <input 
-                              type="range"
-                              min="10"
-                              max="100"
-                              value={skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100}
-                              onChange={(e) => setSkinPicker(prev => ({ ...prev, subCropW: Number(e.target.value) }))}
-                              className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>CROP HEIGHT:</span>
-                              <span className="text-indigo-600">{skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100}%</span>
-                            </div>
-                            <input 
-                              type="range"
-                              min="10"
-                              max="100"
-                              value={skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100}
-                              onChange={(e) => setSkinPicker(prev => ({ ...prev, subCropH: Number(e.target.value) }))}
-                              className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                            />
-                          </div>
-                        </div>
+                      {/* 📋 Visual Candidate Selection Guide */}
+                      <div className="space-y-1.5 border-b border-slate-100 pb-3">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">📋 PCB PHOTO SELECTION GUIDE</span>
+                        <svg viewBox="0 0 420 120" className="w-full bg-slate-50 border border-slate-100 rounded-xl p-1.5">
+                          {/* Good Candidate Card */}
+                          <g transform="translate(5, 5)">
+                            <rect width="195" height="110" rx="8" fill="#f0fdf4" stroke="#bbf7d0" strokeWidth="1" />
+                            <text x="10" y="18" fill="#15803d" fontSize="9" fontWeight="bold" fontFamily="sans-serif">✓ GOOD MATCH (Fast Crop)</text>
+                            
+                            {/* Flat Orthogonal Board */}
+                            <rect x="15" y="28" width="55" height="35" rx="3" fill="#166534" />
+                            <rect x="25" y="38" width="35" height="15" rx="1" fill="#15803d" />
+                            <line x1="15" y1="38" x2="15" y2="52" stroke="#eab308" strokeWidth="2" strokeDasharray="2,2" />
+                            <line x1="70" y1="38" x2="70" y2="52" stroke="#eab308" strokeWidth="2" strokeDasharray="2,2" />
+                            
+                            <text x="80" y="38" fill="#14532d" fontSize="8" fontWeight="bold" fontFamily="sans-serif">Flat Orthogonal</text>
+                            <text x="80" y="50" fill="#166534" fontSize="8" fontFamily="sans-serif">• Solid color backdrops</text>
+                            <text x="80" y="62" fill="#166534" fontSize="8" fontFamily="sans-serif">• Clear header grids</text>
+                            <text x="80" y="74" fill="#166534" fontSize="8" fontFamily="sans-serif">• High edge contrast</text>
+                          </g>
+
+                          {/* Bad Candidate Card */}
+                          <g transform="translate(210, 5)">
+                            <rect width="200" height="110" rx="8" fill="#fef2f2" stroke="#fecaca" strokeWidth="1" />
+                            <text x="10" y="18" fill="#b91c1c" fontSize="9" fontWeight="bold" fontFamily="sans-serif">✗ BAD MATCH (Skew/Noise)</text>
+                            
+                            {/* Perspective / Shadow Board */}
+                            <g transform="translate(15, 30) skewX(-15) scale(1, 0.7)">
+                              <rect x="0" y="0" width="50" height="30" rx="2" fill="#7f1d1d" />
+                            </g>
+                            {/* Curved wire/hand line */}
+                            <path d="M 12,68 C 22,60 32,75 52,58" fill="none" stroke="#dc2626" strokeWidth="1.5" />
+                            
+                            <text x="80" y="38" fill="#7f1d1d" fontSize="8" fontWeight="bold" fontFamily="sans-serif">Perspective Skew</text>
+                            <text x="80" y="50" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Wires, tables, shadows</text>
+                            <text x="80" y="62" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Render axes/ledges</text>
+                            <text x="80" y="74" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Hand/fingers in frame</text>
+                          </g>
+                        </svg>
                       </div>
 
                       {/* Image Orientation Controls */}
@@ -3844,7 +3935,48 @@ export default function SchematicCanvas({
                       setSkinPicker(prev => ({ ...prev, loading: true }));
                       
                       try {
-                        const compressedUrl = await compressImageToDataUrl(finalUrl, 250, 0.6);
+                        // 1. Load the raw image
+                        const img = new Image();
+                        img.crossOrigin = "anonymous";
+                        img.src = finalUrl.startsWith('data:') ? finalUrl : `/api/proxy-image?url=${encodeURIComponent(finalUrl)}`;
+                        await new Promise((resolve, reject) => {
+                          img.onload = resolve;
+                          img.onerror = reject;
+                        });
+                        
+                        // 2. Generate the final processed canvas at high quality
+                        const processedCanvas = processImageBackground(
+                          img,
+                          skinPicker.tolerance,
+                          skinPicker.doCrop,
+                          skinPicker.deskewAngle || 0,
+                          {
+                            x: skinPicker.subCropX !== undefined ? skinPicker.subCropX : 0,
+                            y: skinPicker.subCropY !== undefined ? skinPicker.subCropY : 0,
+                            w: skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100,
+                            h: skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100
+                          },
+                          skinPicker.taperFactor || 0,
+                          skinPicker.shearFactor || 0
+                        );
+                        
+                        // 3. Downscale transparent PNG to max 500px to maintain crisp resolution with zero background noise
+                        let processedDataUrl = null;
+                        if (processedCanvas) {
+                          const maxDim = 500;
+                          const scale = Math.min(1, maxDim / Math.max(processedCanvas.width, processedCanvas.height));
+                          if (scale < 1) {
+                            const scaleCanvas = document.createElement('canvas');
+                            scaleCanvas.width = Math.round(processedCanvas.width * scale);
+                            scaleCanvas.height = Math.round(processedCanvas.height * scale);
+                            const scaleCtx = scaleCanvas.getContext('2d');
+                            scaleCtx.drawImage(processedCanvas, 0, 0, scaleCanvas.width, scaleCanvas.height);
+                            processedDataUrl = scaleCanvas.toDataURL('image/png');
+                          } else {
+                            processedDataUrl = processedCanvas.toDataURL('image/png');
+                          }
+                        }
+                        
                         const finalPins = distributePinsBySides(
                           skinPicker.rawPins,
                           skinPicker.sidesMap,
@@ -3860,19 +3992,34 @@ export default function SchematicCanvas({
                             width: skinPicker.width,
                             height: skinPicker.height,
                             pins: finalPins,
-                            image: compressedUrl || null,
-                            imageTolerance: skinPicker.tolerance,
-                            imageCrop: skinPicker.doCrop,
+                            
+                            // Save processed transparent PNG as active image
+                            image: processedDataUrl || finalUrl,
+                            
+                            // Store original raw settings for editing
+                            rawImage: finalUrl,
+                            rawTolerance: skinPicker.tolerance,
+                            rawStartMargin: skinPicker.startMargin,
+                            rawEndMargin: skinPicker.endMargin,
+                            rawDeskewAngle: skinPicker.deskewAngle,
+                            rawSubCropX: skinPicker.subCropX,
+                            rawSubCropY: skinPicker.subCropY,
+                            rawSubCropW: skinPicker.subCropW,
+                            rawSubCropH: skinPicker.subCropH,
+                            
+                            // Reset dynamic drawing transformations so they are not double-applied on schematic
+                            imageTolerance: 0,
+                            imageCrop: false,
                             imageRotation: skinPicker.rotation || 0,
                             imageFlipH: skinPicker.flipH || false,
                             imageFlipV: skinPicker.flipV || false,
                             imageOpacity: skinPicker.opacity,
                             imageAspect: skinPicker.aspect,
-                            imageDeskew: skinPicker.deskewAngle || 0,
-                            imageSubCropX: skinPicker.subCropX,
-                            imageSubCropY: skinPicker.subCropY,
-                            imageSubCropW: skinPicker.subCropW,
-                            imageSubCropH: skinPicker.subCropH
+                            imageDeskew: 0,
+                            imageSubCropX: 0,
+                            imageSubCropY: 0,
+                            imageSubCropW: 100,
+                            imageSubCropH: 100
                           } : c
                         ));
                       } catch (err) {
