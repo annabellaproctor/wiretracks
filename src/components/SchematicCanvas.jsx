@@ -845,6 +845,41 @@ const distributePinsBySides = (pins, sidesMap, pitch, width, height, pinOffsets 
   return result;
 };
 
+const getConnectedPins = (compId, pinName, currentTraces = [], currentComps = []) => {
+  const startPinStr = `${compId}.${pinName}`;
+  const visited = new Set();
+  const queue = [startPinStr];
+  visited.add(startPinStr);
+  
+  while (queue.length > 0) {
+    const current = queue.shift();
+    currentTraces.forEach(t => {
+      if (t.from === current && !visited.has(t.to)) {
+        visited.add(t.to);
+        queue.push(t.to);
+      } else if (t.to === current && !visited.has(t.from)) {
+        visited.add(t.from);
+        queue.push(t.from);
+      }
+    });
+  }
+  
+  const list = [];
+  visited.forEach(pinStr => {
+    if (pinStr === startPinStr) return;
+    const [cId, pName] = pinStr.split('.');
+    const comp = currentComps.find(c => c.id === cId);
+    if (comp) {
+      list.push({
+        compId: cId,
+        compLabel: comp.label || comp.partNumber || comp.name,
+        pinName: pName
+      });
+    }
+  });
+  return list;
+};
+
 export default function SchematicCanvas({
   components,
   setComponents,
@@ -879,6 +914,11 @@ export default function SchematicCanvas({
   const [contextMenu, setContextMenu] = useState(null); 
   const [skinPicker, setSkinPicker] = useState(null); // { compId, partNumber, images: [], selectedUrl: '', customUrl: '', loading: false }
   const [visibleCount, setVisibleCount] = useState(12);
+
+  // States for interactive pin hover and connection info card
+  const [hoveredPin, setHoveredPin] = useState(null); // { compId, pinName, compLabel, pin }
+  const [tooltipState, setTooltipState] = useState({ visible: false, x: 0, y: 0, compLabel: '', pinName: '', connections: [] });
+  const tooltipTimerRef = useRef(null);
 
   const imageCache = useRef({});
   const previewCanvasRef = useRef(null);
@@ -1100,9 +1140,11 @@ export default function SchematicCanvas({
           skinPicker.shearFactor || 0
         );
         
-        // Auto-fit component dimensions to fit image aspect ratio NICELY without whitespace (horizontally or vertically)
-        if (skinPicker.lastLoadedUrl !== imgUrl) {
-          const cal = autoCalibrateImageSkin(img, skinPicker.tolerance);
+        const isUrlChanged = skinPicker.lastLoadedUrl !== imgUrl;
+        const isMarginChanged = skinPicker.startMargin !== skinPicker.lastStartMargin || skinPicker.endMargin !== skinPicker.lastEndMargin;
+        
+        if (isUrlChanged || isMarginChanged) {
+          const cal = isUrlChanged ? autoCalibrateImageSkin(img, skinPicker.tolerance) : null;
           
           let activeDeskew = skinPicker.deskewAngle || 0;
           let activeSubCropX = skinPicker.subCropX !== undefined ? skinPicker.subCropX : 0;
@@ -1114,7 +1156,7 @@ export default function SchematicCanvas({
           let activeTaper = skinPicker.taperFactor || 0;
           let activeShear = skinPicker.shearFactor || 0;
           
-          if (cal) {
+          if (isUrlChanged && cal) {
             activeDeskew = cal.deskewAngle;
             activeSubCropX = cal.subCropX;
             activeSubCropY = cal.subCropY;
@@ -1235,11 +1277,40 @@ export default function SchematicCanvas({
             const scaleToLimit = limit / signalLen;
             const startVal = firstPeak * scaleToLimit;
             const endVal = lastPeak * scaleToLimit;
-            const span = endVal - startVal;
-            const interval = span / Math.max(1, sidePins.length - 1);
+            
+            // Map the best-fit subset of pins that fall within the physical header range
+            const pinPitch = 15;
+            let startPinIdx = 0;
+            let endPinIdx = sidePins.length - 1;
+            let minStartDiff = Infinity;
+            let minEndDiff = Infinity;
             
             sidePins.forEach((p, idx) => {
-              nextOffsets[p.name] = Math.round(startVal + idx * interval);
+              const defaultY = idx * pinPitch + 15;
+              const startDiff = Math.abs(defaultY - startVal);
+              const endDiff = Math.abs(defaultY - endVal);
+              if (startDiff < minStartDiff) {
+                minStartDiff = startDiff;
+                startPinIdx = idx;
+              }
+              if (endDiff < minEndDiff) {
+                minEndDiff = endDiff;
+                endPinIdx = idx;
+              }
+            });
+            
+            const activeCount = endPinIdx - startPinIdx;
+            const span = endVal - startVal;
+            const interval = activeCount > 0 ? (span / activeCount) : 0;
+            
+            sidePins.forEach((p, idx) => {
+              if (idx < startPinIdx) {
+                nextOffsets[p.name] = Math.round(startVal - (startPinIdx - idx) * pinPitch);
+              } else if (idx > endPinIdx) {
+                nextOffsets[p.name] = Math.round(endVal + (idx - endPinIdx) * pinPitch);
+              } else {
+                nextOffsets[p.name] = Math.round(startVal + (idx - startPinIdx) * interval);
+              }
             });
           };
           
@@ -1262,6 +1333,8 @@ export default function SchematicCanvas({
               subCropH: activeSubCropH,
               startMargin: activeStartMargin,
               endMargin: activeEndMargin,
+              lastStartMargin: activeStartMargin,
+              lastEndMargin: activeEndMargin,
               lastLoadedUrl: imgUrl
             };
           });
@@ -1992,30 +2065,116 @@ export default function SchematicCanvas({
           const px = comp.x + pin.x;
           const py = comp.y + pin.y;
 
+          const isLeft = pin.dir === 'left';
+          const isRight = pin.dir === 'right';
+          const isUp = pin.dir === 'up';
+          const isDown = pin.dir === 'down';
+
+          let hasPhysicalDot = false;
+          let dotX = px;
+          let dotY = py;
+          if (comp.image) {
+            const startPctVal = (comp.rawStartMargin !== undefined ? comp.rawStartMargin : 12) / 100;
+            const endPctVal = (comp.rawEndMargin !== undefined ? comp.rawEndMargin : 88) / 100;
+            const relY = pin.y;
+            const relX = pin.x;
+            
+            if (isLeft || isRight) {
+              const minY = comp.height * startPctVal - 10;
+              const maxY = comp.height * endPctVal + 10;
+              if (relY >= minY && relY <= maxY) {
+                hasPhysicalDot = true;
+                dotX = comp.x + comp.width * (isLeft ? startPctVal : endPctVal);
+              }
+            } else if (isUp || isDown) {
+              const minX = comp.width * startPctVal - 10;
+              const maxX = comp.width * endPctVal + 10;
+              if (relX >= minX && relX <= maxX) {
+                hasPhysicalDot = true;
+                dotY = comp.y + comp.height * (isUp ? startPctVal : endPctVal);
+              }
+            }
+          }
+
+          let tx = px;
+          let ty = py;
+          const pinLen = comp.image ? 28 : 8;
+          if (isLeft) tx -= pinLen;
+          else if (isRight) tx += pinLen;
+          else if (isUp) ty -= pinLen;
+          else if (isDown) ty += pinLen;
+
+          // Draw trace line connecting dot inside photo to outer circle
           ctx.strokeStyle = '#1e293b';
           ctx.lineWidth = 1.5;
           ctx.beginPath();
-          
-          const gap = comp.image ? 3 : 0;
-          let startX = px;
-          let startY = py;
-          if (comp.image) {
-            if (pin.dir === 'left') startX -= gap;
-            else if (pin.dir === 'right') startX += gap;
-            else if (pin.dir === 'up') startY -= gap;
-            else if (pin.dir === 'down') startY += gap;
-          }
-          
-          ctx.moveTo(startX, startY);
-          let tx = px;
-          let ty = py;
-          const pinLen = 8;
-          if (pin.dir === 'left') tx -= pinLen;
-          else if (pin.dir === 'right') tx += pinLen;
-          else if (pin.dir === 'up') ty -= pinLen;
-          else if (pin.dir === 'down') ty += pinLen;
+          ctx.moveTo(hasPhysicalDot ? dotX : px, hasPhysicalDot ? dotY : py);
           ctx.lineTo(tx, ty);
           ctx.stroke();
+
+          // Draw the physical pin dot inside the photo ONLY if it falls in the active header range
+          if (comp.image && hasPhysicalDot) {
+            ctx.save();
+            ctx.fillStyle = '#f59e0b'; // Gold header pin dot
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(dotX, dotY, 2, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // Draw hover highlight in pill form
+          const isHovered = hoveredPin && hoveredPin.compId === comp.id && hoveredPin.pinName === pin.name;
+          if (isHovered) {
+            ctx.save();
+            ctx.fillStyle = 'rgba(79, 70, 229, 0.14)';
+            ctx.strokeStyle = 'rgba(79, 70, 229, 0.5)';
+            ctx.lineWidth = 1.2;
+            
+            let pillX, pillY, pillW, pillH;
+            if (comp.image) {
+              if (isLeft) {
+                pillX = tx - 4;
+                pillY = py - 7;
+                pillW = (comp.x - tx) + 2;
+                pillH = 14;
+              } else if (isRight) {
+                pillX = comp.x + comp.width + 2;
+                pillY = py - 7;
+                pillW = (tx - (comp.x + comp.width)) + 2;
+                pillH = 14;
+              } else {
+                pillX = tx - 8;
+                pillY = ty - 8;
+                pillW = 16;
+                pillH = 16;
+              }
+            } else {
+              if (isLeft) {
+                pillX = tx - 4;
+                pillY = py - 7;
+                pillW = (px - tx) + 26;
+                pillH = 14;
+              } else if (isRight) {
+                pillX = px - 6;
+                pillY = py - 7;
+                pillW = (tx - px) + 10;
+                pillH = 14;
+              } else {
+                pillX = tx - 8;
+                pillY = ty - 8;
+                pillW = 16;
+                pillH = 16;
+              }
+            }
+            
+            ctx.roundRect(pillX, pillY, pillW, pillH, 6);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+          }
 
           ctx.fillStyle = '#f8fafc';
           ctx.strokeStyle = '#1e293b';
@@ -2025,19 +2184,32 @@ export default function SchematicCanvas({
           ctx.fill();
           ctx.stroke();
 
-          ctx.font = '9px JetBrains Mono, monospace';
-          ctx.fillStyle = '#475569';
+          ctx.font = 'bold 9px JetBrains Mono, monospace';
           ctx.textAlign = pin.dir === 'left' ? 'left' : (pin.dir === 'right' ? 'right' : 'center');
           
           let labelX = px;
           let labelY = py + 3;
-          const textMargin = 5;
-          if (pin.dir === 'left') labelX += textMargin;
-          else if (pin.dir === 'right') labelX -= textMargin;
-          else if (pin.dir === 'up') labelY += textMargin + 4;
-          else if (pin.dir === 'down') labelY -= textMargin;
+          if (comp.image) {
+            if (isLeft) labelX = tx + 7;
+            else if (isRight) labelX = tx - 7;
+            else if (isUp) labelY = ty + 12;
+            else if (isDown) labelY = ty - 12;
+          } else {
+            const textMargin = 5;
+            if (pin.dir === 'left') labelX += textMargin;
+            else if (pin.dir === 'right') labelX -= textMargin;
+            else if (pin.dir === 'up') labelY += textMargin + 4;
+            else if (pin.dir === 'down') labelY -= textMargin;
+          }
 
+          ctx.save();
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = 1.8;
+          ctx.lineJoin = 'round';
+          ctx.strokeText(pin.name, labelX, labelY);
+          ctx.fillStyle = '#ffffff';
           ctx.fillText(pin.name, labelX, labelY);
+          ctx.restore();
         });
       });
     }
@@ -2082,7 +2254,7 @@ export default function SchematicCanvas({
     }
 
     ctx.restore();
-  }, [components, traces, customTexts, customShapes, pan, zoom, selectedComponentId, selectedTraceId, drawingWireFrom, drawingShapeStart, rulerStart, rulerEnd, mousePos, dimensions, gridSize, layersVisibility, wireColor]);
+  }, [components, traces, customTexts, customShapes, pan, zoom, selectedComponentId, selectedTraceId, drawingWireFrom, drawingShapeStart, rulerStart, rulerEnd, mousePos, dimensions, gridSize, layersVisibility, wireColor, hoveredPin]);
 
   const drawComponentSymbol = (ctx, comp) => {
     const cx = comp.x + comp.width / 2;
@@ -2421,6 +2593,75 @@ export default function SchematicCanvas({
 
     if (drawingWireFrom || drawingShapeStart || rulerStart) {
       setMousePos(world);
+    }
+
+    // Pin hovering detection
+    let foundHovered = null;
+    if (activeTool === 'select' && !isPanning && !draggingCompId && !draggingNodule) {
+      for (const comp of components) {
+        for (const pin of comp.pins) {
+          const px = comp.x + pin.x;
+          const py = comp.y + pin.y;
+          let tx = px;
+          let ty = py;
+          const pinLen = 8;
+          if (pin.dir === 'left') tx -= pinLen;
+          else if (pin.dir === 'right') tx += pinLen;
+          else if (pin.dir === 'up') ty -= pinLen;
+          else if (pin.dir === 'down') ty += pinLen;
+
+          const distCircle = Math.hypot(world.x - tx, world.y - ty);
+          const distLabel = Math.hypot(world.x - px, world.y - py);
+          if (distCircle <= 10 || distLabel <= 10) {
+            foundHovered = {
+              compId: comp.id,
+              pinName: pin.name,
+              compLabel: comp.label || comp.partNumber || comp.name,
+              pin
+            };
+            break;
+          }
+        }
+        if (foundHovered) break;
+      }
+    }
+
+    if (foundHovered) {
+      if (!hoveredPin || hoveredPin.compId !== foundHovered.compId || hoveredPin.pinName !== foundHovered.pinName) {
+        setHoveredPin(foundHovered);
+        setTooltipState(prev => ({ ...prev, visible: false }));
+        if (tooltipTimerRef.current) {
+          clearTimeout(tooltipTimerRef.current);
+        }
+        
+        const canvasEl = canvasRef.current;
+        if (canvasEl) {
+          const rect = canvasEl.getBoundingClientRect();
+          const tooltipX = e.clientX - rect.left + 15;
+          const tooltipY = e.clientY - rect.top + 15;
+          const conns = getConnectedPins(foundHovered.compId, foundHovered.pinName, traces, components);
+          
+          tooltipTimerRef.current = setTimeout(() => {
+            setTooltipState({
+              visible: true,
+              x: tooltipX,
+              y: tooltipY,
+              compLabel: foundHovered.compLabel,
+              pinName: foundHovered.pinName,
+              connections: conns
+            });
+          }, 450);
+        }
+      }
+    } else {
+      if (hoveredPin) {
+        setHoveredPin(null);
+        setTooltipState(prev => ({ ...prev, visible: false }));
+        if (tooltipTimerRef.current) {
+          clearTimeout(tooltipTimerRef.current);
+          tooltipTimerRef.current = null;
+        }
+      }
     }
   };
 
@@ -2882,7 +3123,11 @@ export default function SchematicCanvas({
       subCropX: comp.rawSubCropX !== undefined ? comp.rawSubCropX : (comp.imageSubCropX || 0),
       subCropY: comp.rawSubCropY !== undefined ? comp.rawSubCropY : (comp.imageSubCropY || 0),
       subCropW: comp.rawSubCropW !== undefined ? comp.rawSubCropW : (comp.imageSubCropW || 100),
-      subCropH: comp.rawSubCropH !== undefined ? comp.rawSubCropH : (comp.imageSubCropH || 100)
+      subCropH: comp.rawSubCropH !== undefined ? comp.rawSubCropH : (comp.imageSubCropH || 100),
+      startMargin: comp.rawStartMargin !== undefined ? comp.rawStartMargin : 12,
+      endMargin: comp.rawEndMargin !== undefined ? comp.rawEndMargin : 88,
+      lastStartMargin: comp.rawStartMargin !== undefined ? comp.rawStartMargin : 12,
+      lastEndMargin: comp.rawEndMargin !== undefined ? comp.rawEndMargin : 88
     });
   };
 
@@ -2939,6 +3184,10 @@ export default function SchematicCanvas({
           subCropY: comp.rawSubCropY !== undefined ? comp.rawSubCropY : (comp.imageSubCropY || 0),
           subCropW: comp.rawSubCropW !== undefined ? comp.rawSubCropW : (comp.imageSubCropW || 100),
           subCropH: comp.rawSubCropH !== undefined ? comp.rawSubCropH : (comp.imageSubCropH || 100),
+          startMargin: comp.rawStartMargin !== undefined ? comp.rawStartMargin : 12,
+          endMargin: comp.rawEndMargin !== undefined ? comp.rawEndMargin : 88,
+          lastStartMargin: comp.rawStartMargin !== undefined ? comp.rawStartMargin : 12,
+          lastEndMargin: comp.rawEndMargin !== undefined ? comp.rawEndMargin : 88,
           loading: true
         };
       }
@@ -4051,6 +4300,55 @@ export default function SchematicCanvas({
         onContextMenu={handleContextMenu}
         className={`${getCursorClass()} w-full h-full bg-[#fbf9f5]`}
       />
+
+      {/* Floating Pin Connection Tooltip Card */}
+      {tooltipState.visible && (
+        <div 
+          style={{ 
+            position: 'absolute', 
+            left: tooltipState.x, 
+            top: tooltipState.y, 
+            zIndex: 9999,
+            pointerEvents: 'none'
+          }}
+          className="bg-white/95 backdrop-blur-md border border-slate-200/80 rounded-xl p-3 shadow-xl shadow-slate-200/50 max-w-xs transition-all duration-150 animate-in fade-in zoom-in-95"
+        >
+          <div className="space-y-1.5 font-sans">
+            <div className="flex items-center space-x-1.5">
+              <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded uppercase tracking-wider">
+                {tooltipState.compLabel}
+              </span>
+              <span className="text-[10px] font-mono font-semibold text-slate-500 bg-slate-100 px-1 rounded">
+                Pin {tooltipState.pinName}
+              </span>
+            </div>
+            
+            <div className="border-t border-slate-100 pt-1.5">
+              <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
+                Electrical Net Connections:
+              </span>
+              {tooltipState.connections.length === 0 ? (
+                <span className="text-[10px] text-slate-400 italic block">
+                  Unconnected pin
+                </span>
+              ) : (
+                <div className="space-y-1 max-h-32 overflow-y-auto pr-1">
+                  {tooltipState.connections.map((c, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-slate-50 border border-slate-100 rounded px-1.5 py-0.5">
+                      <span className="text-slate-600 font-medium truncate max-w-[120px]">
+                        {c.compLabel}
+                      </span>
+                      <span className="text-indigo-600 font-mono font-bold text-[9px] bg-indigo-50 px-1 rounded ml-2">
+                        {c.pinName}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -28,48 +28,48 @@ function md5(str) {
   ];
   var r = [
     7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-    5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
     4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
     6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
   ];
   var x = [];
   var n = str.length;
   var i;
-  for(i=0; i<n; i++) {
-    x[i>>2] |= (str.charCodeAt(i) & 0xff) << ((i%4)*8);
+  for (i = 0; i < n; i++) {
+    x[i >> 2] |= (str.charCodeAt(i) & 0xff) << ((i % 4) * 8);
   }
-  x[n>>2] |= 0x80 << ((n%4)*8);
-  var len = n*8;
-  x[(((n+8)>>6)+1)<<4] = 0;
-  x[(((n+8)>>6)+1)*16 - 2] = len & 0xffffffff;
-  x[(((n+8)>>6)+1)*16 - 1] = Math.floor(len / 4294967296);
+  x[n >> 2] |= 0x80 << ((n % 4) * 8);
+  var len = n * 8;
+  x[(((n + 8) >> 6) + 1) << 4] = 0;
+  x[(((n + 8) >> 6) + 1) * 16 - 2] = len & 0xffffffff;
+  x[(((n + 8) >> 6) + 1) * 16 - 1] = Math.floor(len / 4294967296);
 
   var a = 0x67452301;
   var b = 0xefcdab89;
   var c = 0x98badcfe;
   var d = 0x10325476;
 
-  for(i=0; i<x.length; i+=16) {
+  for (i = 0; i < x.length; i += 16) {
     var olda = a, oldb = b, oldc = c, oldd = d;
-    for(var j=0; j<64; j++) {
+    for (var j = 0; j < 64; j++) {
       var f, g;
-      if(j<16) {
+      if (j < 16) {
         f = (b & c) | ((~b) & d);
         g = j;
-      } else if(j<32) {
+      } else if (j < 32) {
         f = (d & b) | ((~d) & c);
-        g = (5*j + 1) % 16;
-      } else if(j<48) {
+        g = (5 * j + 1) % 16;
+      } else if (j < 48) {
         f = b ^ c ^ d;
-        g = (3*j + 5) % 16;
+        g = (3 * j + 5) % 16;
       } else {
         f = c ^ (b | (~d));
-        g = (7*j) % 16;
+        g = (7 * j) % 16;
       }
       var temp = d;
       d = c;
       c = b;
-      b = (b + rotateLeft((a + f + k[j] + (x[i+g]||0)), r[j])) | 0;
+      b = (b + rotateLeft((a + f + k[j] + (x[i + g] || 0)), r[j])) | 0;
       a = temp;
     }
     a = (a + olda) | 0;
@@ -77,17 +77,17 @@ function md5(str) {
     c = (c + oldc) | 0;
     d = (d + oldd) | 0;
   }
-  
+
   function rotateLeft(l, val) {
     return (l << val) | (l >>> (32 - val));
   }
 
   var hex = "";
   var words = [a, b, c, d];
-  for(i=0; i<4; i++) {
+  for (i = 0; i < 4; i++) {
     var word = words[i];
-    for(var j=0; j<4; j++) {
-      var byte = (word >> (j*8)) & 0xff;
+    for (var j = 0; j < 4; j++) {
+      var byte = (word >> (j * 8)) & 0xff;
       hex += byte.toString(16).padStart(2, '0');
     }
   }
@@ -341,7 +341,7 @@ export async function searchPartsUnified(query, provider = 'all') {
       } else {
         // Fallback Tier 2: Query Mouser, DigiKey, Official LCSC API, and other premium/configured providers
         console.log("[searchPartsUnified] Tier 1 rate-limited, failed, or returned zero results. Querying Tier 2 providers...");
-        
+
         const tier2Promises = [
           searchLCSCOfficialAPI(query),
           searchDigiKeyParts(query),
@@ -361,7 +361,7 @@ export async function searchPartsUnified(query, provider = 'all') {
         if (lcscOfficial) results.push(...lcscOfficial);
         if (digikey) results.push(...digikey);
         if (mouser) results.push(...mouser);
-        
+
         // Include any remaining Tier 1 results
         if (easyeda) results.push(...easyeda);
         if (lcsc) results.push(...lcsc);
@@ -427,7 +427,7 @@ export async function searchPartsUnified(query, provider = 'all') {
   // Deduplicate by model code using our programmatic merge conflict resolver
   const uniqueParts = deduplicateComponents(results);
   const finalResults = uniqueParts.slice(0, 15);
-  
+
   setCachedResult(cacheKey, finalResults);
 
   // Pre-cache each individual component item under its own part number and LCSC ID
