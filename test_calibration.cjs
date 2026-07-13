@@ -1,0 +1,502 @@
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+const puppeteer = require('puppeteer-core');
+
+const IMAGE_URL = 'https://pg-cdn-a2.datacaciques.com/00/NDAy/17/12/16/9e54ifgdt2zm4pk9/6fec5ff2017d7c73.jpg';
+const OUTPUT_PATH = '/Users/aap/.gemini/antigravity-ide/brain/306ed7bb-ecc4-412d-bf5d-1c414febc237/warped_result.png';
+
+async function run() {
+  console.log(`[1/4] Downloading image via curl...`);
+  let base64Image;
+  try {
+    const buffer = execSync(`curl -s -L "${IMAGE_URL}"`, { maxBuffer: 20 * 1024 * 1024 });
+    base64Image = `data:image/png;base64,${buffer.toString('base64')}`;
+    console.log(`Downloaded image size: ${buffer.length} bytes`);
+  } catch (err) {
+    console.error(`Failed to download image:`, err);
+    process.exit(1);
+  }
+
+  console.log(`[2/4] Launching headless Chrome...`);
+  const browser = await puppeteer.launch({
+    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    headless: true
+  });
+  const page = await browser.newPage();
+
+  console.log(`[3/4] Running calibration inside page canvas context...`);
+
+  const pageContextCode = `
+    window.solveLinearSystem = (A, B) => {
+      const n = B.length;
+      for (let i = 0; i < n; i++) {
+        let maxEl = Math.abs(A[i][i]);
+        let maxRow = i;
+        for (let k = i + 1; k < n; k++) {
+          if (Math.abs(A[k][i]) > maxEl) {
+            maxEl = Math.abs(A[k][i]);
+            maxRow = k;
+          }
+        }
+        for (let k = i; k < n; k++) {
+          const tmp = A[maxRow][k];
+          A[maxRow][k] = A[i][k];
+          A[i][k] = tmp;
+        }
+        const tmp = B[maxRow];
+        B[maxRow] = B[i];
+        B[i] = tmp;
+        for (let k = i + 1; k < n; k++) {
+          const c = -A[k][i] / A[i][i];
+          for (let j = i; j < n; j++) {
+            if (i === j) {
+              A[k][j] = 0;
+            } else {
+              A[k][j] += c * A[i][j];
+            }
+          }
+          B[k] += c * B[i];
+        }
+      }
+      const x = new Array(n).fill(0);
+      for (let i = n - 1; i >= 0; i--) {
+        x[i] = B[i] / A[i][i];
+        for (let k = i - 1; k >= 0; k--) {
+          B[k] -= A[k][i] * x[i];
+        }
+      }
+      return x;
+    };
+
+    window.getHomography = (srcPoints, destPoints) => {
+      const A = [];
+      const B = [];
+      for (let i = 0; i < 4; i++) {
+        const sx = srcPoints[i].x;
+        const sy = srcPoints[i].y;
+        const dx = destPoints[i].x;
+        const dy = destPoints[i].y;
+        A.push([dx, dy, 1, 0, 0, 0, -dx * sx, -dy * sx]);
+        B.push(sx);
+        A.push([0, 0, 0, dx, dy, 1, -dx * sy, -dy * sy]);
+        B.push(sy);
+      }
+      const h = window.solveLinearSystem(A, B);
+      return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+    };
+
+    window.processPerspectiveWarp = (srcCanvas, taperFactor = 0, shearFactor = 0) => {
+      if (taperFactor === 0 && shearFactor === 0) return srcCanvas;
+      
+      const w = srcCanvas.width;
+      const h = srcCanvas.height;
+      const destCanvas = document.createElement('canvas');
+      destCanvas.width = w;
+      destCanvas.height = h;
+      const destCtx = destCanvas.getContext('2d', { willReadFrequently: true });
+      
+      const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+      const srcData = srcCtx.getImageData(0, 0, w, h);
+      const destData = destCtx.createImageData(w, h);
+      
+      const srcPixels = srcData.data;
+      const destPixels = destData.data;
+      
+      const centerX = w / 2;
+      
+      for (let y = 0; y < h; y++) {
+        const taper = 1 + taperFactor * (y / h - 0.5);
+        const shearOffset = shearFactor * (y - h / 2);
+        
+        for (let x = 0; x < w; x++) {
+          const srcX = Math.round(centerX + (x - centerX) * taper + shearOffset);
+          const destIdx = (y * w + x) * 4;
+          
+          if (srcX >= 0 && srcX < w) {
+            const srcIdx = (y * w + srcX) * 4;
+            destPixels[destIdx] = srcPixels[srcIdx];
+            destPixels[destIdx+1] = srcPixels[srcIdx+1];
+            destPixels[destIdx+2] = srcPixels[srcIdx+2];
+            destPixels[destIdx+3] = srcPixels[srcIdx+3];
+          } else {
+            destPixels[destIdx+3] = 0;
+          }
+        }
+      }
+      
+      destCtx.putImageData(destData, 0, 0);
+      return destCanvas;
+    };
+
+    window.autoCalibrateAndWarp = (img, tolerance = 50) => {
+      try {
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        
+        const rawCanvas = document.createElement('canvas');
+        rawCanvas.width = w;
+        rawCanvas.height = h;
+        const rawCtx = rawCanvas.getContext('2d', { willReadFrequently: true });
+        rawCtx.drawImage(img, 0, 0);
+        
+        const rawImgData = rawCtx.getImageData(0, 0, w, h);
+        const data = rawImgData.data;
+        
+        // Sample background color at corner
+        const baseCanvas = document.createElement('canvas');
+        baseCanvas.width = 1;
+        baseCanvas.height = 1;
+        const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
+        baseCtx.drawImage(img, 5, 5, 5, 5, 0, 0, 1, 1);
+        const baseCorner = baseCtx.getImageData(0, 0, 1, 1).data;
+        const bgR = baseCorner[0];
+        const bgG = baseCorner[1];
+        const bgB = baseCorner[2];
+        const bgA = baseCorner[3];
+        const isBgTransparent = bgA < 50;
+        
+        // Key out background first
+        const isBackground = new Uint8Array(w * h);
+        if (!isBgTransparent && tolerance > 0) {
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const idx = (y * w + x) * 4;
+              const r = data[idx];
+              const g = data[idx+1];
+              const b = data[idx+2];
+              const dist = Math.sqrt(
+                Math.pow(r - bgR, 2) +
+                Math.pow(g - bgG, 2) +
+                Math.pow(b - bgB, 2)
+              );
+              if (dist < tolerance) {
+                data[idx+3] = 0;
+                isBackground[y * w + x] = 1;
+              }
+            }
+          }
+          rawCtx.putImageData(rawImgData, 0, 0);
+        }
+        
+        // Create PCB mask
+        const pcbMask = new Uint8Array(w * h);
+        let chromaticPixelCount = 0;
+        
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const idx = (y * w + x) * 4;
+            if (isBackground[y * w + x] === 1) continue;
+            
+            const r = data[idx];
+            const g = data[idx+1];
+            const b = data[idx+2];
+            
+            const maxCh = Math.max(r, g, b);
+            const minCh = Math.min(r, g, b);
+            const saturation = maxCh - minCh;
+            
+            if (saturation > 25 && maxCh > 35) {
+              pcbMask[y * w + x] = 1;
+              chromaticPixelCount++;
+            }
+          }
+        }
+        
+        const totalForegroundPixels = w * h - isBackground.reduce((a, b) => a + b, 0);
+        const useChromatic = chromaticPixelCount > totalForegroundPixels * 0.15;
+        console.log("Chromatic foreground pixels:", chromaticPixelCount, "use chromatic mode:", useChromatic);
+        
+        const boardMask = useChromatic ? pcbMask : new Uint8Array(w * h).map((_, idx) => 1 - isBackground[idx]);
+        
+        // Find boundary points of our selected mask
+        const boundaryPoints = [];
+        const pad = 5;
+        
+        for (let y = pad; y < h - pad; y++) {
+          for (let x = pad; x < w - pad; x++) {
+            if (boardMask[y * w + x] === 0) continue;
+            
+            const leftVal = boardMask[y * w + x - 1];
+            const rightVal = boardMask[y * w + x + 1];
+            const upVal = boardMask[(y - 1) * w + x];
+            const downVal = boardMask[(y + 1) * w + x];
+            
+            if (leftVal === 0 || rightVal === 0 || upVal === 0 || downVal === 0) {
+              boundaryPoints.push({ x, y });
+            }
+          }
+        }
+        
+        console.log("PCB boundary points detected:", boundaryPoints.length);
+        if (boundaryPoints.length < 4) {
+          throw new Error("No PCB boundary points detected!");
+        }
+        
+        // Find optimal box orientation
+        let minArea = Infinity;
+        let bestTheta = 0;
+        
+        for (let theta = 0; theta < 90; theta += 0.5) {
+          const rad = (theta * Math.PI) / 180;
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          
+          let minX = Infinity, maxX = -Infinity;
+          let minY = Infinity, maxY = -Infinity;
+          
+          const step = Math.max(1, Math.round(boundaryPoints.length / 500));
+          for (let i = 0; i < boundaryPoints.length; i += step) {
+            const p = boundaryPoints[i];
+            const rx = p.x * cos - p.y * sin;
+            const ry = p.x * sin + p.y * cos;
+            
+            if (rx < minX) minX = rx;
+            if (rx > maxX) maxX = rx;
+            if (ry < minY) minY = ry;
+            if (ry > maxY) maxY = ry;
+          }
+          
+          const area = (maxX - minX) * (maxY - minY);
+          if (area < minArea) {
+            minArea = area;
+            bestTheta = theta;
+          }
+        }
+        
+        console.log("Optimal Box Angle:", bestTheta);
+        
+        // Project points to find actual vertices
+        const rad = (bestTheta * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        
+        let tlPt = null, trPt = null, blPt = null, brPt = null;
+        let minTL = Infinity, minBL = Infinity, maxTR = -Infinity, maxBR = -Infinity;
+        
+        for (let i = 0; i < boundaryPoints.length; i++) {
+          const p = boundaryPoints[i];
+          const rx = p.x * cos - p.y * sin;
+          const ry = p.x * sin + p.y * cos;
+          
+          const scoreTL = rx + ry;
+          if (scoreTL < minTL) {
+            minTL = scoreTL;
+            tlPt = p;
+          }
+          
+          const scoreBL = rx - ry;
+          if (scoreBL < minBL) {
+            minBL = scoreBL;
+            blPt = p;
+          }
+          
+          const scoreTR = rx - ry;
+          if (scoreTR > maxTR) {
+            maxTR = scoreTR;
+            trPt = p;
+          }
+          
+          const scoreBR = rx + ry;
+          if (scoreBR > maxBR) {
+            maxBR = scoreBR;
+            brPt = p;
+          }
+        }
+        
+        console.log("Detected True PCB Vertices:");
+        console.log("Top-Left:", tlPt.x, tlPt.y);
+        console.log("Top-Right:", trPt.x, trPt.y);
+        console.log("Bottom-Left:", blPt.x, blPt.y);
+        console.log("Bottom-Right:", brPt.x, brPt.y);
+        
+        // Contract vertices slightly (1.5%) towards the center of the board
+        // to shave off background bleed and white borders!
+        const cx = (tlPt.x + trPt.x + blPt.x + brPt.x) / 4;
+        const cy = (tlPt.y + trPt.y + blPt.y + brPt.y) / 4;
+        const shrinkFactor = 0.015;
+        
+        const shrinkCorner = (p) => {
+          return {
+            x: Math.round(p.x + (cx - p.x) * shrinkFactor),
+            y: Math.round(p.y + (cy - p.y) * shrinkFactor)
+          };
+        };
+        
+        const tlShrunk = shrinkCorner(tlPt);
+        const trShrunk = shrinkCorner(trPt);
+        const blShrunk = shrinkCorner(blPt);
+        const brShrunk = shrinkCorner(brPt);
+        
+        // Determine aspect ratio from shrunk PCB corners
+        const topW = Math.sqrt(Math.pow(trShrunk.x - tlShrunk.x, 2) + Math.pow(trShrunk.y - tlShrunk.y, 2));
+        const botW = Math.sqrt(Math.pow(brShrunk.x - blShrunk.x, 2) + Math.pow(brShrunk.y - blShrunk.y, 2));
+        const leftH = Math.sqrt(Math.pow(blShrunk.x - tlShrunk.x, 2) + Math.pow(blShrunk.y - tlShrunk.y, 2));
+        const rightH = Math.sqrt(Math.pow(brShrunk.x - trShrunk.x, 2) + Math.pow(brShrunk.y - trShrunk.y, 2));
+        
+        const destW = Math.round((topW + botW) / 2);
+        const destH = Math.round((leftH + rightH) / 2);
+        
+        let outW = destW;
+        let outH = destH;
+        let pTL = tlShrunk, pTR = trShrunk, pBL = blShrunk, pBR = brShrunk;
+        
+        if (destW > destH) {
+          outW = destH;
+          outH = destW;
+          pTL = trShrunk;
+          pTR = brShrunk;
+          pBL = tlShrunk;
+          pBR = blShrunk;
+        }
+        
+        // 5. Perform True Projective Homography Warp
+        const destCanvas = document.createElement('canvas');
+        destCanvas.width = outW;
+        destCanvas.height = outH;
+        const destCtx = destCanvas.getContext('2d', { willReadFrequently: true });
+        const destImgData = destCtx.createImageData(outW, outH);
+        const destPixels = destImgData.data;
+        
+        const srcCorners = [pTL, pTR, pBL, pBR];
+        const destCorners = [
+          { x: 0, y: 0 },
+          { x: outW - 1, y: 0 },
+          { x: 0, y: outH - 1 },
+          { x: outW - 1, y: outH - 1 }
+        ];
+        
+        const H = window.getHomography(srcCorners, destCorners);
+        
+        for (let v = 0; v < outH; v++) {
+          for (let u = 0; u < outW; u++) {
+            const denom = H[6] * u + H[7] * v + H[8];
+            const srcX = Math.round((H[0] * u + H[1] * v + H[2]) / denom);
+            const srcY = Math.round((H[3] * u + H[4] * v + H[5]) / denom);
+            
+            const destIdx = (v * outW + u) * 4;
+            if (srcX >= 0 && srcX < w && srcY >= 0 && srcY < h) {
+              const srcIdx = (srcY * w + srcX) * 4;
+              destPixels[destIdx] = data[srcIdx];
+              destPixels[destIdx+1] = data[srcIdx+1];
+              destPixels[destIdx+2] = data[srcIdx+2];
+              destPixels[destIdx+3] = data[srcIdx+3];
+            } else {
+              destPixels[destIdx+3] = 0;
+            }
+          }
+        }
+        destCtx.putImageData(destImgData, 0, 0);
+        
+        // --- PASS 6: Fine-Tuning Rotation and Shear Optimization ---
+        let bestFineAngle = 0;
+        let bestFineShear = 0;
+        let maxVar = 0;
+        
+        const fineCanvas = document.createElement('canvas');
+        fineCanvas.width = outW;
+        fineCanvas.height = h;
+        const fineCtx = fineCanvas.getContext('2d', { willReadFrequently: true });
+        
+        const innerStart = Math.round(outW * 0.1);
+        const innerEnd = Math.round(outW * 0.9);
+        
+        for (let angle = -3.0; angle <= 3.0; angle += 0.2) {
+          const aRad = (angle * Math.PI) / 180;
+          for (let shear = -0.05; shear <= 0.05; shear += 0.005) {
+            fineCtx.clearRect(0, 0, outW, outH);
+            fineCtx.save();
+            fineCtx.translate(outW / 2, outH / 2);
+            fineCtx.rotate(aRad);
+            fineCtx.drawImage(destCanvas, -outW / 2, -outH / 2);
+            fineCtx.restore();
+            
+            const sheared = window.processPerspectiveWarp(fineCanvas, 0, shear);
+            const warpedData = sheared.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, outW, outH).data;
+            
+            const colGradients = new Array(outW).fill(0);
+            for (let y = Math.round(outH * 0.15); y < Math.round(outH * 0.85); y++) {
+              for (let x = innerStart; x < innerEnd; x++) {
+                const idx = (y * outW + x) * 4;
+                const idxRight = (y * outW + x + 1) * 4;
+                if (warpedData[idx+3] < 50 || warpedData[idxRight+3] < 50) continue;
+                
+                const b1 = (warpedData[idx] + warpedData[idx+1] + warpedData[idx+2]) / 3;
+                const b2 = (warpedData[idxRight] + warpedData[idxRight+1] + warpedData[idxRight+2]) / 3;
+                colGradients[x] += Math.abs(b2 - b1);
+              }
+            }
+            
+            const subGradients = colGradients.slice(innerStart, innerEnd);
+            const mean = subGradients.reduce((a, b) => a + b, 0) / subGradients.length;
+            const variance = subGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / subGradients.length;
+            
+            if (variance > maxVar) {
+              maxVar = variance;
+              bestFineAngle = angle;
+              bestFineShear = shear;
+            }
+          }
+        }
+        
+        console.log("Optimal fine rotation:", bestFineAngle, "fine shear:", bestFineShear);
+        
+        const finalCanvas = document.createElement('canvas');
+        finalCanvas.width = outW;
+        finalCanvas.height = outH;
+        const finalCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
+        
+        finalCtx.clearRect(0, 0, outW, outH);
+        finalCtx.save();
+        finalCtx.translate(outW / 2, outH / 2);
+        finalCtx.rotate((bestFineAngle * Math.PI) / 180);
+        finalCtx.drawImage(destCanvas, -outW / 2, -outH / 2);
+        finalCtx.restore();
+        
+        const finalWarped = window.processPerspectiveWarp(finalCanvas, 0, bestFineShear);
+        
+        return {
+          width: outW,
+          height: outH,
+          dataUrl: finalWarped.toDataURL()
+        };
+      } catch (err) {
+        console.error(err);
+        return null;
+      }
+    };
+  `;
+
+  page.on('console', msg => console.log('PAGE LOG:', msg.text()));
+  await page.evaluate(pageContextCode);
+
+  try {
+    const result = await page.evaluate(async (imgUrl) => {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            resolve(window.autoCalibrateAndWarp(img, 50));
+          } catch(e) {
+            reject(e.toString());
+          }
+        };
+        img.onerror = () => reject("Image load failed");
+        img.src = imgUrl;
+      });
+    }, base64Image);
+
+    console.log(`[4/4] Calibration and projective warp succeeded!`);
+    console.log(`Output Image Dimensions: ${result.width}x${result.height}`);
+
+    const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, "");
+    fs.writeFileSync(OUTPUT_PATH, base64Data, 'base64');
+    console.log(`Warped output image saved successfully to: ${OUTPUT_PATH}`);
+  } catch (err) {
+    console.error(`Calibration runtime error inside page:`, err);
+  }
+
+  await browser.close();
+}
+
+run();

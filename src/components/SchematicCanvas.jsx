@@ -2,7 +2,52 @@ import React, { useRef, useEffect, useState } from 'react';
 import { findOrthogonalPath } from '../utils/router';
 import { Lock, Unlock, Trash2, RotateCw, Settings, Search, Edit3, Navigation, Move, HelpCircle, Type, Square, Ruler, Layers } from 'lucide-react';
 import { searchComponentImages, searchJLCPartCode } from '../utils/partsApi';
-const processImageBackground = (img, tolerance = 20, doCrop = true, deskewAngle = 0, subCrop = { x: 0, y: 0, w: 100, h: 100 }) => {
+const processPerspectiveWarp = (srcCanvas, taperFactor = 0, shearFactor = 0) => {
+  if (taperFactor === 0 && shearFactor === 0) return srcCanvas;
+  
+  const w = srcCanvas.width;
+  const h = srcCanvas.height;
+  const destCanvas = document.createElement('canvas');
+  destCanvas.width = w;
+  destCanvas.height = h;
+  const destCtx = destCanvas.getContext('2d', { willReadFrequently: true });
+  
+  const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+  const srcData = srcCtx.getImageData(0, 0, w, h);
+  const destData = destCtx.createImageData(w, h);
+  
+  const srcPixels = srcData.data;
+  const destPixels = destData.data;
+  
+  const centerX = w / 2;
+  
+  for (let y = 0; y < h; y++) {
+    // taperFactor scales horizontal span linearly from top to bottom
+    const taper = 1 + taperFactor * (y / h - 0.5);
+    // shearFactor shifts rows horizontally relative to center vertical line
+    const shearOffset = shearFactor * (y - h / 2);
+    
+    for (let x = 0; x < w; x++) {
+      const srcX = Math.round(centerX + (x - centerX) * taper + shearOffset);
+      const destIdx = (y * w + x) * 4;
+      
+      if (srcX >= 0 && srcX < w) {
+        const srcIdx = (y * w + srcX) * 4;
+        destPixels[destIdx] = srcPixels[srcIdx];
+        destPixels[destIdx+1] = srcPixels[srcIdx+1];
+        destPixels[destIdx+2] = srcPixels[srcIdx+2];
+        destPixels[destIdx+3] = srcPixels[srcIdx+3];
+      } else {
+        destPixels[destIdx+3] = 0; // Out of bounds is transparent
+      }
+    }
+  }
+  
+  destCtx.putImageData(destData, 0, 0);
+  return destCanvas;
+};
+
+const processImageBackground = (img, tolerance = 20, doCrop = true, deskewAngle = 0, subCrop = { x: 0, y: 0, w: 100, h: 100 }, taperFactor = 0, shearFactor = 0) => {
   try {
     if (!img || img.naturalWidth === 0) return null;
     
@@ -51,16 +96,27 @@ const processImageBackground = (img, tolerance = 20, doCrop = true, deskewAngle 
     const imgData = workingCtx.getImageData(0, 0, workingCanvas.width, workingCanvas.height);
     const data = imgData.data;
     
-    // Baseline corner color for transparency keying
-    const bgR = data[0];
-    const bgG = data[1];
-    const bgB = data[2];
+    // Get baseline corner color from preCropCanvas top-left pixel BEFORE rotation
+    const baseCanvas = document.createElement('canvas');
+    baseCanvas.width = 1;
+    baseCanvas.height = 1;
+    const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
+    baseCtx.drawImage(preCropCanvas, Math.min(5, cropW - 1), Math.min(5, cropH - 1), 1, 1, 0, 0, 1, 1);
+    const rawCorner = baseCtx.getImageData(0, 0, 1, 1).data;
+    const bgR = rawCorner[0];
+    const bgG = rawCorner[1];
+    const bgB = rawCorner[2];
     
     if (tolerance > 0) {
       for (let i = 0; i < data.length; i += 4) {
         const r = data[i];
         const g = data[i+1];
         const b = data[i+2];
+        const a = data[i+3];
+        
+        // Skip already transparent pixels from rotation border spacing
+        if (a === 0) continue;
+        
         const dist = Math.sqrt(
           Math.pow(r - bgR, 2) +
           Math.pow(g - bgG, 2) +
@@ -71,6 +127,12 @@ const processImageBackground = (img, tolerance = 20, doCrop = true, deskewAngle 
         }
       }
       workingCtx.putImageData(imgData, 0, 0);
+    }
+    
+    // Apply perspective taper/shear warp if taperFactor !== 0 or shearFactor !== 0
+    if (taperFactor !== 0 || shearFactor !== 0) {
+      workingCanvas = processPerspectiveWarp(workingCanvas, taperFactor, shearFactor);
+      workingCtx = workingCanvas.getContext('2d', { willReadFrequently: true });
     }
     
     if (doCrop && tolerance > 0) {
@@ -116,18 +178,18 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
   try {
     if (!img || img.naturalWidth === 0) return null;
     
-    // 1. Find best deskew angle using Projection Profile Variance Analysis
-    // We test angles from -90 to +90 in a two-pass fast search
-    let bestAngle = 0;
-    let maxVariance = 0;
+    // Use a higher resolution (300px max) to preserve the thin header pins!
+    const scale = Math.min(1, 300 / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.round(img.naturalWidth * scale);
+    const h = Math.round(img.naturalHeight * scale);
     
     const testCanvas = document.createElement('canvas');
     const testCtx = testCanvas.getContext('2d', { willReadFrequently: true });
     
-    const scale = Math.min(1, 150 / Math.max(img.naturalWidth, img.naturalHeight));
-    const w = Math.round(img.naturalWidth * scale);
-    const h = Math.round(img.naturalHeight * scale);
-    // Pass 1: Rough search (-90 to +90 degrees in 5-degree steps)
+    // --- PASS 1: Rough search (-90 to +90 degrees in 5-degree steps) ---
+    let bestAngle = 0;
+    let maxVariance = 0;
+    
     for (let angle = -90; angle <= 90; angle += 5) {
       const angleRad = (angle * Math.PI) / 180;
       const absCos = Math.abs(Math.cos(angleRad));
@@ -148,25 +210,27 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
       const imgData = testCtx.getImageData(0, 0, rotW, rotH);
       const data = imgData.data;
       
-      const colSums = new Array(rotW).fill(0);
-      for (let x = 0; x < rotW; x++) {
-        for (let y = 0; y < rotH; y++) {
+      // Calculate vertical gradients (horizontal brightness changes)
+      const colGradients = new Array(rotW).fill(0);
+      for (let y = 0; y < rotH; y++) {
+        for (let x = 0; x < rotW - 1; x++) {
           const idx = (y * rotW + x) * 4;
-          const brightness = (data[idx] + data[idx+1] + data[idx+2]) / 3;
-          colSums[x] += brightness;
+          const idxRight = (y * rotW + x + 1) * 4;
+          const b1 = (data[idx] + data[idx+1] + data[idx+2]) / 3;
+          const b2 = (data[idxRight] + data[idxRight+1] + data[idxRight+2]) / 3;
+          colGradients[x] += Math.abs(b2 - b1);
         }
       }
       
-      const mean = colSums.reduce((a, b) => a + b, 0) / rotW;
-      const variance = colSums.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / rotW;
-      
+      const mean = colGradients.reduce((a, b) => a + b, 0) / rotW;
+      const variance = colGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / rotW;
       if (variance > maxVariance) {
         maxVariance = variance;
         bestAngle = angle;
       }
     }
     
-    // Pass 2: Fine search around bestAngle
+    // --- PASS 2: Fine search around bestAngle (-4 to +4 in 0.5-degree steps) ---
     let fineBestAngle = bestAngle;
     for (let angle = bestAngle - 4; angle <= bestAngle + 4; angle += 0.5) {
       const angleRad = (angle * Math.PI) / 180;
@@ -188,18 +252,19 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
       const imgData = testCtx.getImageData(0, 0, rotW, rotH);
       const data = imgData.data;
       
-      const colSums = new Array(rotW).fill(0);
-      for (let x = 0; x < rotW; x++) {
-        for (let y = 0; y < rotH; y++) {
+      const colGradients = new Array(rotW).fill(0);
+      for (let y = 0; y < rotH; y++) {
+        for (let x = 0; x < rotW - 1; x++) {
           const idx = (y * rotW + x) * 4;
-          const brightness = (data[idx] + data[idx+1] + data[idx+2]) / 3;
-          colSums[x] += brightness;
+          const idxRight = (y * rotW + x + 1) * 4;
+          const b1 = (data[idx] + data[idx+1] + data[idx+2]) / 3;
+          const b2 = (data[idxRight] + data[idxRight+1] + data[idxRight+2]) / 3;
+          colGradients[x] += Math.abs(b2 - b1);
         }
       }
       
-      const mean = colSums.reduce((a, b) => a + b, 0) / rotW;
-      const variance = colSums.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / rotW;
-      
+      const mean = colGradients.reduce((a, b) => a + b, 0) / rotW;
+      const variance = colGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / rotW;
       if (variance > maxVariance) {
         maxVariance = variance;
         fineBestAngle = angle;
@@ -208,14 +273,14 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
     bestAngle = fineBestAngle;
     
     // 2. Perform deskew, transparency keying, and auto-crop to get bounds of the physical board
-    const deskewedCanvas = document.createElement('canvas');
-    const deskewedCtx = deskewedCanvas.getContext('2d', { willReadFrequently: true });
+    let deskewedCanvas = document.createElement('canvas');
+    let deskewedCtx = deskewedCanvas.getContext('2d', { willReadFrequently: true });
     
-    const angleRad = (bestAngle * Math.PI) / 180;
-    const absCos = Math.abs(Math.cos(angleRad));
-    const absSin = Math.abs(Math.sin(angleRad));
-    const rotW = Math.round(img.naturalWidth * absCos + img.naturalHeight * absSin);
-    const rotH = Math.round(img.naturalWidth * absSin + img.naturalHeight * absCos);
+    let angleRad = (bestAngle * Math.PI) / 180;
+    let absCos = Math.abs(Math.cos(angleRad));
+    let absSin = Math.abs(Math.sin(angleRad));
+    let rotW = Math.round(img.naturalWidth * absCos + img.naturalHeight * absSin);
+    let rotH = Math.round(img.naturalWidth * absSin + img.naturalHeight * absCos);
     
     deskewedCanvas.width = rotW;
     deskewedCanvas.height = rotH;
@@ -223,12 +288,21 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
     deskewedCtx.rotate(angleRad);
     deskewedCtx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
     
-    const rotData = deskewedCtx.getImageData(0, 0, rotW, rotH);
-    const rotPixels = rotData.data;
+    let rotData = deskewedCtx.getImageData(0, 0, rotW, rotH);
+    let rotPixels = rotData.data;
     
-    const bgR = rotPixels[0];
-    const bgG = rotPixels[1];
-    const bgB = rotPixels[2];
+    const baseCanvas = document.createElement('canvas');
+    baseCanvas.width = 1;
+    baseCanvas.height = 1;
+    const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
+    baseCtx.drawImage(img, 5, 5, 5, 5, 0, 0, 1, 1);
+    const baseCorner = baseCtx.getImageData(0, 0, 1, 1).data;
+    const bgR = baseCorner[0];
+    const bgG = baseCorner[1];
+    const bgB = baseCorner[2];
+    const bgA = baseCorner[3];
+    const isBgTransparent = bgA < 50;
+    console.log("[autoCalibrateImageSkin] Detected background color:", bgR, bgG, bgB, "Alpha:", bgA, "Transparent:", isBgTransparent);
     
     let minX = rotW, minY = rotH, maxX = 0, maxY = 0;
     let hasPixels = false;
@@ -236,12 +310,72 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
     for (let y = 0; y < rotH; y++) {
       for (let x = 0; x < rotW; x++) {
         const idx = (y * rotW + x) * 4;
-        const dist = Math.sqrt(
-          Math.pow(rotPixels[idx] - bgR, 2) +
-          Math.pow(rotPixels[idx+1] - bgG, 2) +
-          Math.pow(rotPixels[idx+2] - bgB, 2)
-        );
-        if (dist >= tolerance) {
+        if (rotPixels[idx+3] < 50) continue;
+        
+        if (!isBgTransparent) {
+          const dist = Math.sqrt(
+            Math.pow(rotPixels[idx] - bgR, 2) +
+            Math.pow(rotPixels[idx+1] - bgG, 2) +
+            Math.pow(rotPixels[idx+2] - bgB, 2)
+          );
+          if (dist < tolerance) continue;
+        }
+        
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        hasPixels = true;
+      }
+    }
+    
+    let subCrop = { x: 0, y: 0, w: 100, h: 100 };
+    if (hasPixels) {
+      subCrop = {
+        x: Math.round((minX / rotW) * 100),
+        y: Math.round((minY / rotH) * 100),
+        w: Math.round(((maxX - minX) / rotW) * 100),
+        h: Math.round(((maxY - minY) / rotH) * 100)
+      };
+    }
+    
+    // Enforce longways-vertical (portrait) layout!
+    if (hasPixels && (maxX - minX) > (maxY - minY)) {
+      bestAngle = (bestAngle + 90) % 360;
+      angleRad = (bestAngle * Math.PI) / 180;
+      absCos = Math.abs(Math.cos(angleRad));
+      absSin = Math.abs(Math.sin(angleRad));
+      rotW = Math.round(img.naturalWidth * absCos + img.naturalHeight * absSin);
+      rotH = Math.round(img.naturalWidth * absSin + img.naturalHeight * absCos);
+      
+      deskewedCanvas = document.createElement('canvas');
+      deskewedCanvas.width = rotW;
+      deskewedCanvas.height = rotH;
+      deskewedCtx = deskewedCanvas.getContext('2d', { willReadFrequently: true });
+      deskewedCtx.translate(rotW / 2, rotH / 2);
+      deskewedCtx.rotate(angleRad);
+      deskewedCtx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+      
+      rotData = deskewedCtx.getImageData(0, 0, rotW, rotH);
+      rotPixels = rotData.data;
+      
+      minX = rotW; minY = rotH; maxX = 0; maxY = 0;
+      hasPixels = false;
+      
+      for (let y = 0; y < rotH; y++) {
+        for (let x = 0; x < rotW; x++) {
+          const idx = (y * rotW + x) * 4;
+          if (rotPixels[idx+3] < 50) continue;
+          
+          if (!isBgTransparent) {
+            const dist = Math.sqrt(
+              Math.pow(rotPixels[idx] - bgR, 2) +
+              Math.pow(rotPixels[idx+1] - bgG, 2) +
+              Math.pow(rotPixels[idx+2] - bgB, 2)
+            );
+            if (dist < tolerance) continue;
+          }
+          
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
@@ -249,9 +383,122 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
           hasPixels = true;
         }
       }
+      
+      if (hasPixels) {
+        subCrop = {
+          x: Math.round((minX / rotW) * 100),
+          y: Math.round((minY / rotH) * 100),
+          w: Math.round(((maxX - minX) / rotW) * 100),
+          h: Math.round(((maxY - minY) / rotH) * 100)
+        };
+      }
     }
     
-    let subCrop = { x: 0, y: 0, w: 100, h: 100 };
+    // --- PASS 3: Crop-focused Double-Run Refinement (-3 to +3 in 0.1-degree steps) ---
+    // This runs directly on the isolated board region to maximize precision!
+    let refineBestAngle = 0;
+    let refineMaxVariance = 0;
+    
+    const cropW = maxX - minX + 1;
+    const cropH = maxY - minY + 1;
+    const cropTestCanvas = document.createElement('canvas');
+    cropTestCanvas.width = cropW;
+    cropTestCanvas.height = cropH;
+    const cropTestCtx = cropTestCanvas.getContext('2d', { willReadFrequently: true });
+    cropTestCtx.drawImage(deskewedCanvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
+    
+    const refScale = Math.min(1, 200 / Math.max(cropW, cropH));
+    const refW = Math.round(cropW * refScale);
+    const refH = Math.round(cropH * refScale);
+    
+    const refCanvas = document.createElement('canvas');
+    const refCtx = refCanvas.getContext('2d', { willReadFrequently: true });
+    
+    for (let dAngle = -3; dAngle <= 3; dAngle += 0.1) {
+      const angleRadRef = (dAngle * Math.PI) / 180;
+      const absCosRef = Math.abs(Math.cos(angleRadRef));
+      const absSinRef = Math.abs(Math.sin(angleRadRef));
+      const rotWRef = Math.round(refW * absCosRef + refH * absSinRef);
+      const rotHRef = Math.round(refW * absSinRef + refH * absCosRef);
+      
+      refCanvas.width = rotWRef;
+      refCanvas.height = rotHRef;
+      
+      refCtx.clearRect(0, 0, rotWRef, rotHRef);
+      refCtx.save();
+      refCtx.translate(rotWRef / 2, rotHRef / 2);
+      refCtx.rotate(angleRadRef);
+      refCtx.drawImage(cropTestCanvas, -refW / 2, -refH / 2, refW, refH);
+      refCtx.restore();
+      
+      const imgDataRef = refCtx.getImageData(0, 0, rotWRef, rotHRef);
+      const dataRef = imgDataRef.data;
+      
+      const colGradientsRef = new Array(rotWRef).fill(0);
+      for (let y = Math.round(rotHRef * 0.15); y < Math.round(rotHRef * 0.85); y++) {
+        for (let x = 0; x < rotWRef - 1; x++) {
+          const idx = (y * rotWRef + x) * 4;
+          const idxRight = (y * rotWRef + x + 1) * 4;
+          const b1 = (dataRef[idx] + dataRef[idx+1] + dataRef[idx+2]) / 3;
+          const b2 = (dataRef[idxRight] + dataRef[idxRight+1] + dataRef[idxRight+2]) / 3;
+          colGradientsRef[x] += Math.abs(b2 - b1);
+        }
+      }
+      
+      const meanRef = colGradientsRef.reduce((a, b) => a + b, 0) / rotWRef;
+      const varianceRef = colGradientsRef.reduce((sum, val) => sum + Math.pow(val - meanRef, 2), 0) / rotWRef;
+      if (varianceRef > refineMaxVariance) {
+        refineMaxVariance = varianceRef;
+        refineBestAngle = dAngle;
+      }
+    }
+    
+    // Apply final sub-degree refinement
+    bestAngle = (bestAngle + refineBestAngle) % 360;
+    
+    // Re-crop final board at refined best angle
+    angleRad = (bestAngle * Math.PI) / 180;
+    absCos = Math.abs(Math.cos(angleRad));
+    absSin = Math.abs(Math.sin(angleRad));
+    rotW = Math.round(img.naturalWidth * absCos + img.naturalHeight * absSin);
+    rotH = Math.round(img.naturalWidth * absSin + img.naturalHeight * absCos);
+    
+    deskewedCanvas = document.createElement('canvas');
+    deskewedCanvas.width = rotW;
+    deskewedCanvas.height = rotH;
+    deskewedCtx = deskewedCanvas.getContext('2d', { willReadFrequently: true });
+    deskewedCtx.translate(rotW / 2, rotH / 2);
+    deskewedCtx.rotate(angleRad);
+    deskewedCtx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+    
+    rotData = deskewedCtx.getImageData(0, 0, rotW, rotH);
+    rotPixels = rotData.data;
+    
+    minX = rotW; minY = rotH; maxX = 0; maxY = 0;
+    hasPixels = false;
+    
+    for (let y = 0; y < rotH; y++) {
+      for (let x = 0; x < rotW; x++) {
+        const idx = (y * rotW + x) * 4;
+        if (rotPixels[idx+3] < 50) continue;
+        
+        if (!isBgTransparent) {
+          const dist = Math.sqrt(
+            Math.pow(rotPixels[idx] - bgR, 2) +
+            Math.pow(rotPixels[idx+1] - bgG, 2) +
+            Math.pow(rotPixels[idx+2] - bgB, 2)
+          );
+          if (dist < tolerance) continue;
+        }
+        
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        hasPixels = true;
+      }
+    }
+    
     if (hasPixels) {
       subCrop = {
         x: Math.round((minX / rotW) * 100),
@@ -310,8 +557,130 @@ const autoCalibrateImageSkin = (img, tolerance = 20) => {
     const startMargin = Math.round((leftPeakIdx / finalW) * 100);
     const endMargin = Math.round((rightPeakIdx / finalW) * 100);
     
+    // --- PASS 4: Perspective Taper Correction Search ---
+    let bestTaper = 0;
+    let maxTaperVariance = 0;
+    
+    const warpTestCanvas = document.createElement('canvas');
+    warpTestCanvas.width = finalW;
+    warpTestCanvas.height = finalH;
+    const warpTestCtx = warpTestCanvas.getContext('2d', { willReadFrequently: true });
+    warpTestCtx.drawImage(deskewedCanvas, minX, minY, finalW, finalH, 0, 0, finalW, finalH);
+    
+    const innerStart = Math.round(finalW * 0.1);
+    const innerEnd = Math.round(finalW * 0.9);
+    
+    for (let taper = -0.35; taper <= 0.35; taper += 0.01) {
+      const warped = processPerspectiveWarp(warpTestCanvas, taper, 0);
+      const warpedData = warped.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH).data;
+      
+      const colGradients = new Array(finalW).fill(0);
+      for (let y = Math.round(finalH * 0.15); y < Math.round(finalH * 0.85); y++) {
+        for (let x = innerStart; x < innerEnd; x++) {
+          const idx = (y * finalW + x) * 4;
+          const idxRight = (y * finalW + x + 1) * 4;
+          if (warpedData[idx+3] < 50 || warpedData[idxRight+3] < 50) continue;
+          
+          const b1 = (warpedData[idx] + warpedData[idx+1] + warpedData[idx+2]) / 3;
+          const b2 = (warpedData[idxRight] + warpedData[idxRight+1] + warpedData[idxRight+2]) / 3;
+          colGradients[x] += Math.abs(b2 - b1);
+        }
+      }
+      
+      const subGradients = colGradients.slice(innerStart, innerEnd);
+      const mean = subGradients.reduce((a, b) => a + b, 0) / subGradients.length;
+      const variance = subGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / subGradients.length;
+      
+      if (variance > maxTaperVariance) {
+        maxTaperVariance = variance;
+        bestTaper = taper;
+      }
+    }
+    
+    // --- PASS 5: Perspective Shear Correction Search ---
+    let bestShear = 0;
+    let maxShearVariance = 0;
+    
+    for (let shear = -0.20; shear <= 0.20; shear += 0.01) {
+      const warped = processPerspectiveWarp(warpTestCanvas, bestTaper, shear);
+      const warpedData = warped.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH).data;
+      
+      const colGradients = new Array(finalW).fill(0);
+      for (let y = Math.round(finalH * 0.15); y < Math.round(finalH * 0.85); y++) {
+        for (let x = innerStart; x < innerEnd; x++) {
+          const idx = (y * finalW + x) * 4;
+          const idxRight = (y * finalW + x + 1) * 4;
+          if (warpedData[idx+3] < 50 || warpedData[idxRight+3] < 50) continue;
+          
+          const b1 = (warpedData[idx] + warpedData[idx+1] + warpedData[idx+2]) / 3;
+          const b2 = (warpedData[idxRight] + warpedData[idxRight+1] + warpedData[idxRight+2]) / 3;
+          colGradients[x] += Math.abs(b2 - b1);
+        }
+      }
+      
+      const subGradients = colGradients.slice(innerStart, innerEnd);
+      const mean = subGradients.reduce((a, b) => a + b, 0) / subGradients.length;
+      const variance = subGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / subGradients.length;
+      
+      if (variance > maxShearVariance) {
+        maxShearVariance = variance;
+        bestShear = shear;
+      }
+    }
+    
+    // --- PASS 6: Final Fine Rotation Refinement ---
+    let finalFineAngle = 0;
+    let maxFineVariance = 0;
+    
+    const fineTestCanvas = document.createElement('canvas');
+    fineTestCanvas.width = finalW;
+    fineTestCanvas.height = finalH;
+    const fineTestCtx = fineTestCanvas.getContext('2d', { willReadFrequently: true });
+    
+    const warpedBoard = processPerspectiveWarp(warpTestCanvas, bestTaper, bestShear);
+    
+    for (let fineAngle = -1.5; fineAngle <= 1.5; fineAngle += 0.1) {
+      const fineAngleRad = (fineAngle * Math.PI) / 180;
+      fineTestCanvas.width = finalW;
+      fineTestCanvas.height = finalH;
+      fineTestCtx.clearRect(0, 0, finalW, finalH);
+      fineTestCtx.save();
+      fineTestCtx.translate(finalW / 2, finalH / 2);
+      fineTestCtx.rotate(fineAngleRad);
+      fineTestCtx.drawImage(warpedBoard, -finalW / 2, -finalH / 2);
+      fineTestCtx.restore();
+      
+      const warpedData = fineTestCtx.getImageData(0, 0, finalW, finalH).data;
+      
+      const colGradients = new Array(finalW).fill(0);
+      for (let y = Math.round(finalH * 0.15); y < Math.round(finalH * 0.85); y++) {
+        for (let x = innerStart; x < innerEnd; x++) {
+          const idx = (y * finalW + x) * 4;
+          const idxRight = (y * finalW + x + 1) * 4;
+          if (warpedData[idx+3] < 50 || warpedData[idxRight+3] < 50) continue;
+          
+          const b1 = (warpedData[idx] + warpedData[idx+1] + warpedData[idx+2]) / 3;
+          const b2 = (warpedData[idxRight] + warpedData[idxRight+1] + warpedData[idxRight+2]) / 3;
+          colGradients[x] += Math.abs(b2 - b1);
+        }
+      }
+      
+      const subGradients = colGradients.slice(innerStart, innerEnd);
+      const mean = subGradients.reduce((a, b) => a + b, 0) / subGradients.length;
+      const variance = subGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / subGradients.length;
+      
+      if (variance > maxFineVariance) {
+        maxFineVariance = variance;
+        finalFineAngle = fineAngle;
+      }
+    }
+    
+    bestAngle = bestAngle + finalFineAngle;
+    
     return {
       deskewAngle: bestAngle,
+      taperFactor: bestTaper,
+      shearFactor: bestShear,
       subCropX: subCrop.x,
       subCropY: subCrop.y,
       subCropW: subCrop.w,
@@ -674,7 +1043,9 @@ export default function SchematicCanvas({
             y: skinPicker.subCropY !== undefined ? skinPicker.subCropY : 0,
             w: skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100,
             h: skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100
-          }
+          },
+          skinPicker.taperFactor || 0,
+          skinPicker.shearFactor || 0
         );
         
         // Auto-fit component dimensions to fit image aspect ratio NICELY without whitespace (horizontally or vertically)
@@ -688,6 +1059,8 @@ export default function SchematicCanvas({
           let activeSubCropH = skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100;
           let activeStartMargin = skinPicker.startMargin !== undefined ? skinPicker.startMargin : 12;
           let activeEndMargin = skinPicker.endMargin !== undefined ? skinPicker.endMargin : 88;
+          let activeTaper = skinPicker.taperFactor || 0;
+          let activeShear = skinPicker.shearFactor || 0;
           
           if (cal) {
             activeDeskew = cal.deskewAngle;
@@ -697,6 +1070,8 @@ export default function SchematicCanvas({
             activeSubCropH = cal.subCropH;
             activeStartMargin = cal.startMargin;
             activeEndMargin = cal.endMargin;
+            activeTaper = cal.taperFactor;
+            activeShear = cal.shearFactor;
           }
           
           const autoProcessed = processImageBackground(
@@ -704,7 +1079,9 @@ export default function SchematicCanvas({
             skinPicker.tolerance,
             skinPicker.doCrop,
             activeDeskew,
-            { x: activeSubCropX, y: activeSubCropY, w: activeSubCropW, h: activeSubCropH }
+            { x: activeSubCropX, y: activeSubCropY, w: activeSubCropW, h: activeSubCropH },
+            activeTaper,
+            activeShear
           );
           
           const imgRatio = autoProcessed.width / autoProcessed.height;
@@ -1208,16 +1585,18 @@ export default function SchematicCanvas({
         }
 
         if (comp.image) {
-          const tolerance = comp.imageTolerance !== undefined ? comp.imageTolerance : 20;
+          const tolerance = comp.imageTolerance !== undefined ? comp.imageTolerance : 50;
           const doCrop = comp.imageCrop !== undefined ? comp.imageCrop : true;
           const deskewAngle = comp.imageDeskew !== undefined ? comp.imageDeskew : 0;
+          const taperFactor = comp.imageTaper !== undefined ? comp.imageTaper : 0;
+          const shearFactor = comp.imageShear !== undefined ? comp.imageShear : 0;
           const scX = comp.imageSubCropX !== undefined ? comp.imageSubCropX : 0;
           const scY = comp.imageSubCropY !== undefined ? comp.imageSubCropY : 0;
           const scW = comp.imageSubCropW !== undefined ? comp.imageSubCropW : 100;
           const scH = comp.imageSubCropH !== undefined ? comp.imageSubCropH : 100;
           
           const cacheKey = `raw_${comp.image}`;
-          const processedKey = `processed_${tolerance}_${doCrop}_${deskewAngle}_${scX}_${scY}_${scW}_${scH}_${comp.image}`;
+          const processedKey = `processed_${tolerance}_${doCrop}_${deskewAngle}_${taperFactor}_${shearFactor}_${scX}_${scY}_${scW}_${scH}_${comp.image}`;
           
           let cachedImg = imageCache.current[cacheKey];
           if (!cachedImg) {
@@ -1231,8 +1610,8 @@ export default function SchematicCanvas({
             cachedImg.src = srcUrl;
             
             cachedImg.onload = () => {
-              console.log(`[Onload Calibration Check] comp: ${comp.id}, imageDeskew: ${comp.imageDeskew}`);
-              if (comp.imageDeskew === undefined) {
+              console.log(`[Onload Calibration Check] comp: ${comp.id}, imageDeskew: ${comp.imageDeskew}, imageTaper: ${comp.imageTaper}, imageShear: ${comp.imageShear}, imageSubCropW: ${comp.imageSubCropW}`);
+              if (comp.imageDeskew === undefined || comp.imageTaper === undefined || comp.imageShear === undefined || comp.imageSubCropW === undefined || comp.imageSubCropW === 100) {
                 console.log(`[Onload Calibration Run] Running autoCalibrateImageSkin for comp: ${comp.id}...`);
                 const cal = autoCalibrateImageSkin(cachedImg, tolerance);
                 console.log(`[Onload Calibration Done] Result:`, cal);
@@ -1244,7 +1623,9 @@ export default function SchematicCanvas({
                         tolerance,
                         doCrop,
                         cal.deskewAngle,
-                        { x: cal.subCropX, y: cal.subCropY, w: cal.subCropW, h: cal.subCropH }
+                        { x: cal.subCropX, y: cal.subCropY, w: cal.subCropW, h: cal.subCropH },
+                        cal.taperFactor || 0,
+                        cal.shearFactor || 0
                       );
                       
                       const imgRatio = autoProcessed.width / autoProcessed.height;
@@ -1273,99 +1654,41 @@ export default function SchematicCanvas({
                         newH = Math.max(60, Math.round((newW / imgRatio) / 15) * 15);
                       }
                       
-                      const w = autoProcessed.width;
-                      const h = autoProcessed.height;
-                      const ctxOff = autoProcessed.getContext('2d', { willReadFrequently: true });
-                      const imgData = ctxOff.getImageData(0, 0, w, h);
-                      
                       const leftPins = (c.pins || []).filter(p => sidesMap[p.name] === 'left');
                       const rightPins = (c.pins || []).filter(p => sidesMap[p.name] === 'right');
                       const topPins = (c.pins || []).filter(p => sidesMap[p.name] === 'top');
                       const bottomPins = (c.pins || []).filter(p => sidesMap[p.name] === 'bottom');
                       
                       const nextOffsets = {};
-                      const startPctVal = cal.startMargin / 100;
-                      const endPctVal = cal.endMargin / 100;
+                      const startVal = newH * 0.04;
+                      const endVal = newH * 0.96;
+                      const span = endVal - startVal;
                       
-                      const detectPeaks = (sidePins, side, limit) => {
-                        if (sidePins.length === 0) return;
-                        let startX, endX, startY, endY;
-                        const intensities = [];
-                        
-                        if (side === 'left' || side === 'right') {
-                          if (side === 'left') {
-                            startX = Math.round(w * 0.04);
-                            endX = Math.round(w * 0.16);
-                          } else {
-                            startX = Math.round(w * 0.84);
-                            endX = Math.round(w * 0.96);
-                          }
-                          const stripW = Math.max(1, endX - startX);
-                          for (let y = 0; y < h; y++) {
-                            let sum = 0;
-                            for (let x = startX; x < endX; x++) {
-                              const idx = (y * w + x) * 4;
-                              sum += 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
-                            }
-                            intensities.push(sum / stripW);
-                          }
-                        } else {
-                          if (side === 'top') {
-                            startY = Math.round(h * 0.04);
-                            endY = Math.round(h * 0.16);
-                          } else {
-                            startY = Math.round(h * 0.84);
-                            endY = Math.round(h * 0.96);
-                          }
-                          const stripH = Math.max(1, endY - startY);
-                          for (let x = 0; x < w; x++) {
-                            let sum = 0;
-                            for (let y = startY; y < endY; y++) {
-                              const idx = (y * w + x) * 4;
-                              sum += 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
-                            }
-                            intensities.push(sum / stripH);
-                          }
-                        }
-                        
-                        const signalLen = intensities.length;
-                        const peaks = [];
-                        for (let idx = 5; idx < signalLen - 5; idx++) {
-                          const val = intensities[idx];
-                          let isMax = true;
-                          let isMin = true;
-                          const windowSize = Math.max(3, Math.round(signalLen / (sidePins.length * 2.5)));
-                          for (let di = -windowSize; di <= windowSize; di++) {
-                            if (di === 0) continue;
-                            if (intensities[idx + di] >= val) isMax = false;
-                            if (intensities[idx + di] <= val) isMin = false;
-                          }
-                          if (isMax || isMin) peaks.push(idx);
-                        }
-                        
-                        let firstPeak = Math.round(signalLen * startPctVal);
-                        let lastPeak = Math.round(signalLen * endPctVal);
-                        if (peaks.length >= 2) {
-                          peaks.sort((a, b) => a - b);
-                          firstPeak = peaks[0];
-                          lastPeak = peaks[peaks.length - 1];
-                        }
-                        
-                        const scaleToLimit = limit / signalLen;
-                        const startVal = firstPeak * scaleToLimit;
-                        const endVal = lastPeak * scaleToLimit;
-                        const span = endVal - startVal;
-                        const interval = span / Math.max(1, sidePins.length - 1);
-                        
-                        sidePins.forEach((p, idx) => {
-                          nextOffsets[p.name] = Math.round(startVal + idx * interval);
-                        });
-                      };
+                      const leftInterval = span / Math.max(1, leftPins.length - 1);
+                      leftPins.forEach((p, idx) => {
+                        nextOffsets[p.name] = Math.round(startVal + idx * leftInterval);
+                      });
                       
-                      detectPeaks(leftPins, 'left', newH);
-                      detectPeaks(rightPins, 'right', newH);
-                      detectPeaks(topPins, 'top', newW);
-                      detectPeaks(bottomPins, 'bottom', newW);
+                      const rightInterval = span / Math.max(1, rightPins.length - 1);
+                      rightPins.forEach((p, idx) => {
+                        nextOffsets[p.name] = Math.round(startVal + idx * rightInterval);
+                      });
+                      
+                      const topStart = newW * (cal.startMargin / 100);
+                      const topEnd = newW * (cal.endMargin / 100);
+                      const topSpan = topEnd - topStart;
+                      const topInterval = topSpan / Math.max(1, topPins.length - 1);
+                      topPins.forEach((p, idx) => {
+                        nextOffsets[p.name] = Math.round(topStart + idx * topInterval);
+                      });
+                      
+                      const bottomStart = newW * (cal.startMargin / 100);
+                      const bottomEnd = newW * (cal.endMargin / 100);
+                      const bottomSpan = bottomEnd - bottomStart;
+                      const bottomInterval = bottomSpan / Math.max(1, bottomPins.length - 1);
+                      bottomPins.forEach((p, idx) => {
+                        nextOffsets[p.name] = Math.round(bottomStart + idx * bottomInterval);
+                      });
                       
                       const finalPins = distributePinsBySides(
                         c.pins || [],
@@ -1382,6 +1705,8 @@ export default function SchematicCanvas({
                         height: newH,
                         pins: finalPins,
                         imageDeskew: cal.deskewAngle,
+                        imageTaper: cal.taperFactor,
+                        imageShear: cal.shearFactor,
                         imageSubCropX: cal.subCropX,
                         imageSubCropY: cal.subCropY,
                         imageSubCropW: cal.subCropW,
@@ -1401,7 +1726,7 @@ export default function SchematicCanvas({
             imageCache.current[cacheKey] = cachedImg;
           }
           if (cachedImg.complete && cachedImg.naturalWidth !== 0) {
-            if (comp.imageDeskew === undefined && !cachedImg._calibrating) {
+            if ((comp.imageDeskew === undefined || comp.imageTaper === undefined || comp.imageShear === undefined) && !cachedImg._calibrating) {
               cachedImg._calibrating = true;
               const imgToCal = cachedImg;
               setTimeout(() => {
@@ -1416,7 +1741,9 @@ export default function SchematicCanvas({
                         tolerance,
                         doCrop,
                         cal.deskewAngle,
-                        { x: cal.subCropX, y: cal.subCropY, w: cal.subCropW, h: cal.subCropH }
+                        { x: cal.subCropX, y: cal.subCropY, w: cal.subCropW, h: cal.subCropH },
+                        cal.taperFactor || 0,
+                        cal.shearFactor || 0
                       );
                       
                       const imgRatio = autoProcessed.width / autoProcessed.height;
@@ -1445,99 +1772,41 @@ export default function SchematicCanvas({
                         newH = Math.max(60, Math.round((newW / imgRatio) / 15) * 15);
                       }
                       
-                      const w = autoProcessed.width;
-                      const h = autoProcessed.height;
-                      const ctxOff = autoProcessed.getContext('2d', { willReadFrequently: true });
-                      const imgData = ctxOff.getImageData(0, 0, w, h);
-                      
                       const leftPins = (c.pins || []).filter(p => sidesMap[p.name] === 'left');
                       const rightPins = (c.pins || []).filter(p => sidesMap[p.name] === 'right');
                       const topPins = (c.pins || []).filter(p => sidesMap[p.name] === 'top');
                       const bottomPins = (c.pins || []).filter(p => sidesMap[p.name] === 'bottom');
                       
                       const nextOffsets = {};
-                      const startPctVal = cal.startMargin / 100;
-                      const endPctVal = cal.endMargin / 100;
+                      const startVal = newH * 0.04;
+                      const endVal = newH * 0.96;
+                      const span = endVal - startVal;
                       
-                      const detectPeaks = (sidePins, side, limit) => {
-                        if (sidePins.length === 0) return;
-                        let startX, endX, startY, endY;
-                        const intensities = [];
-                        
-                        if (side === 'left' || side === 'right') {
-                          if (side === 'left') {
-                            startX = Math.round(w * 0.04);
-                            endX = Math.round(w * 0.16);
-                          } else {
-                            startX = Math.round(w * 0.84);
-                            endX = Math.round(w * 0.96);
-                          }
-                          const stripW = Math.max(1, endX - startX);
-                          for (let y = 0; y < h; y++) {
-                            let sum = 0;
-                            for (let x = startX; x < endX; x++) {
-                              const idx = (y * w + x) * 4;
-                              sum += 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
-                            }
-                            intensities.push(sum / stripW);
-                          }
-                        } else {
-                          if (side === 'top') {
-                            startY = Math.round(h * 0.04);
-                            endY = Math.round(h * 0.16);
-                          } else {
-                            startY = Math.round(h * 0.84);
-                            endY = Math.round(h * 0.96);
-                          }
-                          const stripH = Math.max(1, endY - startY);
-                          for (let x = 0; x < w; x++) {
-                            let sum = 0;
-                            for (let y = startY; y < endY; y++) {
-                              const idx = (y * w + x) * 4;
-                              sum += 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
-                            }
-                            intensities.push(sum / stripH);
-                          }
-                        }
-                        
-                        const signalLen = intensities.length;
-                        const peaks = [];
-                        for (let idx = 5; idx < signalLen - 5; idx++) {
-                          const val = intensities[idx];
-                          let isMax = true;
-                          let isMin = true;
-                          const windowSize = Math.max(3, Math.round(signalLen / (sidePins.length * 2.5)));
-                          for (let di = -windowSize; di <= windowSize; di++) {
-                            if (di === 0) continue;
-                            if (intensities[idx + di] >= val) isMax = false;
-                            if (intensities[idx + di] <= val) isMin = false;
-                          }
-                          if (isMax || isMin) peaks.push(idx);
-                        }
-                        
-                        let firstPeak = Math.round(signalLen * startPctVal);
-                        let lastPeak = Math.round(signalLen * endPctVal);
-                        if (peaks.length >= 2) {
-                          peaks.sort((a, b) => a - b);
-                          firstPeak = peaks[0];
-                          lastPeak = peaks[peaks.length - 1];
-                        }
-                        
-                        const scaleToLimit = limit / signalLen;
-                        const startVal = firstPeak * scaleToLimit;
-                        const endVal = lastPeak * scaleToLimit;
-                        const span = endVal - startVal;
-                        const interval = span / Math.max(1, sidePins.length - 1);
-                        
-                        sidePins.forEach((p, idx) => {
-                          nextOffsets[p.name] = Math.round(startVal + idx * interval);
-                        });
-                      };
+                      const leftInterval = span / Math.max(1, leftPins.length - 1);
+                      leftPins.forEach((p, idx) => {
+                        nextOffsets[p.name] = Math.round(startVal + idx * leftInterval);
+                      });
                       
-                      detectPeaks(leftPins, 'left', newH);
-                      detectPeaks(rightPins, 'right', newH);
-                      detectPeaks(topPins, 'top', newW);
-                      detectPeaks(bottomPins, 'bottom', newW);
+                      const rightInterval = span / Math.max(1, rightPins.length - 1);
+                      rightPins.forEach((p, idx) => {
+                        nextOffsets[p.name] = Math.round(startVal + idx * rightInterval);
+                      });
+                      
+                      const topStart = newW * (cal.startMargin / 100);
+                      const topEnd = newW * (cal.endMargin / 100);
+                      const topSpan = topEnd - topStart;
+                      const topInterval = topSpan / Math.max(1, topPins.length - 1);
+                      topPins.forEach((p, idx) => {
+                        nextOffsets[p.name] = Math.round(topStart + idx * topInterval);
+                      });
+                      
+                      const bottomStart = newW * (cal.startMargin / 100);
+                      const bottomEnd = newW * (cal.endMargin / 100);
+                      const bottomSpan = bottomEnd - bottomStart;
+                      const bottomInterval = bottomSpan / Math.max(1, bottomPins.length - 1);
+                      bottomPins.forEach((p, idx) => {
+                        nextOffsets[p.name] = Math.round(bottomStart + idx * bottomInterval);
+                      });
                       
                       const finalPins = distributePinsBySides(
                         c.pins || [],
@@ -1554,6 +1823,8 @@ export default function SchematicCanvas({
                         height: newH,
                         pins: finalPins,
                         imageDeskew: cal.deskewAngle,
+                        imageTaper: cal.taperFactor,
+                        imageShear: cal.shearFactor,
                         imageSubCropX: cal.subCropX,
                         imageSubCropY: cal.subCropY,
                         imageSubCropW: cal.subCropW,
@@ -1567,7 +1838,7 @@ export default function SchematicCanvas({
                     return c;
                   }));
                 }
-              }, 50);
+                      }, 50);
             }
             
             let processedCanvas = imageCache.current[processedKey];
@@ -1577,7 +1848,7 @@ export default function SchematicCanvas({
                 y: scY,
                 w: scW,
                 h: scH
-              });
+              }, comp.imageTaper || 0, comp.imageShear || 0);
               imageCache.current[processedKey] = processedCanvas;
             }
             if (processedCanvas) {
@@ -2385,7 +2656,9 @@ export default function SchematicCanvas({
           y: skinPicker.subCropY !== undefined ? skinPicker.subCropY : 0,
           w: skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100,
           h: skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100
-        }
+        },
+        skinPicker.taperFactor || 0,
+        skinPicker.shearFactor || 0
       );
       const w = processedCanvas.width;
       const h = processedCanvas.height;

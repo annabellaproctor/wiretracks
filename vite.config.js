@@ -520,26 +520,19 @@ function easyeda2kicadPlugin(env) {
             return;
           }
           try {
-            console.log(`[Vite Server] Proxying image from: ${imageUrl}`);
-            const targetOrigin = new URL(imageUrl).origin;
-            const response = await fetch(imageUrl, {
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'image/*',
-                'Referer': targetOrigin,
-                'Origin': targetOrigin
+            console.log(`[Vite Server] Proxying image via curl from: ${imageUrl}`);
+            const curlCmd = `curl -s -L "${imageUrl.replace(/"/g, '\\"')}"`;
+            exec(curlCmd, { encoding: 'buffer', maxBuffer: 15 * 1024 * 1024 }, (err, stdout, stderr) => {
+              if (err) {
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: err.message }));
+                return;
               }
+              // Detect content type from stdout or default to image/png
+              res.setHeader('Content-Type', 'image/png');
+              res.setHeader('Access-Control-Allow-Origin', '*');
+              res.end(stdout);
             });
-            if (!response.ok) {
-              res.statusCode = response.status;
-              res.end(JSON.stringify({ error: `Failed to fetch image: ${response.statusText}` }));
-              return;
-            }
-            const buffer = await response.arrayBuffer();
-            const contentType = response.headers.get('content-type') || 'image/jpeg';
-            res.setHeader('Content-Type', contentType);
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.end(Buffer.from(buffer));
           } catch (err) {
             res.statusCode = 500;
             res.end(JSON.stringify({ error: err.message }));
