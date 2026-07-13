@@ -314,7 +314,7 @@ async function run() {
         // to shave off background bleed and white borders!
         const cx = (tlPt.x + trPt.x + blPt.x + brPt.x) / 4;
         const cy = (tlPt.y + trPt.y + blPt.y + brPt.y) / 4;
-        const shrinkFactor = 0.015;
+        const shrinkFactor = -0.007;
         
         const shrinkCorner = (p) => {
           return {
