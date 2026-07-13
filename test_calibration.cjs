@@ -328,6 +328,27 @@ async function run() {
         const blShrunk = shrinkCorner(blPt);
         const brShrunk = shrinkCorner(brPt);
         
+        const isPointInQuad = (p, p0, p1, p2, p3) => {
+          const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+          const c0 = cross(p0, p1, p);
+          const c1 = cross(p1, p3, p);
+          const c2 = cross(p3, p2, p);
+          const c3 = cross(p2, p0, p);
+          return (c0 >= 0 && c1 >= 0 && c2 >= 0 && c3 >= 0) || 
+                 (c0 <= 0 && c1 <= 0 && c2 <= 0 && c3 <= 0);
+        };
+        
+        // Restore opacity inside PCB polygon to prevent transparent holes in labels/chips
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            if (isPointInQuad({x, y}, tlShrunk, trShrunk, blShrunk, brShrunk)) {
+              const idx = (y * w + x) * 4;
+              data[idx+3] = 255;
+            }
+          }
+        }
+        rawCtx.putImageData(rawImgData, 0, 0);
+        
         // Determine aspect ratio from shrunk PCB corners
         const topW = Math.sqrt(Math.pow(trShrunk.x - tlShrunk.x, 2) + Math.pow(trShrunk.y - tlShrunk.y, 2));
         const botW = Math.sqrt(Math.pow(brShrunk.x - blShrunk.x, 2) + Math.pow(brShrunk.y - blShrunk.y, 2));
