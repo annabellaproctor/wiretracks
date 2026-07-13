@@ -5,6 +5,7 @@ const puppeteer = require('puppeteer-core');
 
 const IMAGE_URL = 'https://pg-cdn-a2.datacaciques.com/00/NDAy/17/12/16/9e54ifgdt2zm4pk9/6fec5ff2017d7c73.jpg';
 const OUTPUT_PATH = '/Users/aap/.gemini/antigravity-ide/brain/306ed7bb-ecc4-412d-bf5d-1c414febc237/warped_result.png';
+const FULL_OUTPUT_PATH = '/Users/aap/.gemini/antigravity-ide/brain/306ed7bb-ecc4-412d-bf5d-1c414febc237/warped_full.png';
 
 async function run() {
   console.log(`[1/4] Downloading image via curl...`);
@@ -86,6 +87,22 @@ async function run() {
       return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
     };
 
+    window.invertHomography = (H) => {
+      const [a, b, c, d, e, f, g, h, i] = H;
+      const A = e*i - f*h;
+      const B = -(b*i - c*h);
+      const C = b*f - c*e;
+      const D = -(d*i - f*g);
+      const E = a*i - c*g;
+      const F = -(a*f - c*d);
+      const G = d*h - e*g;
+      const H_ = -(a*h - b*g);
+      const I = a*e - b*d;
+      const det = a*A + b*D + c*G;
+      if (Math.abs(det) < 1e-8) return null;
+      return [A/det, B/det, C/det, D/det, E/det, F/det, G/det, H_/det, I/det];
+    };
+
     window.processPerspectiveWarp = (srcCanvas, taperFactor = 0, shearFactor = 0) => {
       if (taperFactor === 0 && shearFactor === 0) return srcCanvas;
       
@@ -127,6 +144,16 @@ async function run() {
       
       destCtx.putImageData(destData, 0, 0);
       return destCanvas;
+    };
+
+    window.isPointInQuad = (p, p0, p1, p2, p3) => {
+      const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+      const c0 = cross(p0, p1, p);
+      const c1 = cross(p1, p3, p);
+      const c2 = cross(p3, p2, p);
+      const c3 = cross(p2, p0, p);
+      return (c0 >= 0 && c1 >= 0 && c2 >= 0 && c3 >= 0) || 
+             (c0 <= 0 && c1 <= 0 && c2 <= 0 && c3 <= 0);
     };
 
     window.autoCalibrateAndWarp = (img, tolerance = 50) => {
@@ -209,10 +236,9 @@ async function run() {
         
         const boardMask = useChromatic ? pcbMask : new Uint8Array(w * h).map((_, idx) => 1 - isBackground[idx]);
         
-        // Find boundary points of our selected mask
+        // Find boundary points of the blue PCB mask
         const boundaryPoints = [];
         const pad = 5;
-        
         for (let y = pad; y < h - pad; y++) {
           for (let x = pad; x < w - pad; x++) {
             if (boardMask[y * w + x] === 0) continue;
@@ -228,12 +254,11 @@ async function run() {
           }
         }
         
-        console.log("PCB boundary points detected:", boundaryPoints.length);
         if (boundaryPoints.length < 4) {
           throw new Error("No PCB boundary points detected!");
         }
         
-        // Find optimal box orientation
+        // Find optimal box orientation for the blue PCB
         let minArea = Infinity;
         let bestTheta = 0;
         
@@ -266,7 +291,7 @@ async function run() {
         
         console.log("Optimal Box Angle:", bestTheta);
         
-        // Project points to find actual vertices
+        // Find 4 vertices of the blue PCB
         const rad = (bestTheta * Math.PI) / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
@@ -284,19 +309,16 @@ async function run() {
             minTL = scoreTL;
             tlPt = p;
           }
-          
           const scoreBL = rx - ry;
           if (scoreBL < minBL) {
             minBL = scoreBL;
             blPt = p;
           }
-          
           const scoreTR = rx - ry;
           if (scoreTR > maxTR) {
             maxTR = scoreTR;
             trPt = p;
           }
-          
           const scoreBR = rx + ry;
           if (scoreBR > maxBR) {
             maxBR = scoreBR;
@@ -304,14 +326,7 @@ async function run() {
           }
         }
         
-        console.log("Detected True PCB Vertices:");
-        console.log("Top-Left:", tlPt.x, tlPt.y);
-        console.log("Top-Right:", trPt.x, trPt.y);
-        console.log("Bottom-Left:", blPt.x, blPt.y);
-        console.log("Bottom-Right:", brPt.x, brPt.y);
-        
-        // Contract vertices slightly (1.5%) towards the center of the board
-        // to shave off background bleed and white borders!
+        // Expand PCB corners slightly outwards (~0.7%) so it shows the edge
         const cx = (tlPt.x + trPt.x + blPt.x + brPt.x) / 4;
         const cy = (tlPt.y + trPt.y + blPt.y + brPt.y) / 4;
         const shrinkFactor = -0.007;
@@ -328,20 +343,10 @@ async function run() {
         const blShrunk = shrinkCorner(blPt);
         const brShrunk = shrinkCorner(brPt);
         
-        const isPointInQuad = (p, p0, p1, p2, p3) => {
-          const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-          const c0 = cross(p0, p1, p);
-          const c1 = cross(p1, p3, p);
-          const c2 = cross(p3, p2, p);
-          const c3 = cross(p2, p0, p);
-          return (c0 >= 0 && c1 >= 0 && c2 >= 0 && c3 >= 0) || 
-                 (c0 <= 0 && c1 <= 0 && c2 <= 0 && c3 <= 0);
-        };
-        
         // Restore opacity inside PCB polygon to prevent transparent holes in labels/chips
         for (let y = 0; y < h; y++) {
           for (let x = 0; x < w; x++) {
-            if (isPointInQuad({x, y}, tlShrunk, trShrunk, blShrunk, brShrunk)) {
+            if (window.isPointInQuad({x, y}, tlShrunk, trShrunk, blShrunk, brShrunk)) {
               const idx = (y * w + x) * 4;
               data[idx+3] = 255;
             }
@@ -371,7 +376,7 @@ async function run() {
           pBR = blShrunk;
         }
         
-        // 5. Perform True Projective Homography Warp
+        // Perform baseline PCB crop warp
         const destCanvas = document.createElement('canvas');
         destCanvas.width = outW;
         destCanvas.height = outH;
@@ -416,7 +421,7 @@ async function run() {
         
         const fineCanvas = document.createElement('canvas');
         fineCanvas.width = outW;
-        fineCanvas.height = h;
+        fineCanvas.height = outH;
         const fineCtx = fineCanvas.getContext('2d', { willReadFrequently: true });
         
         const innerStart = Math.round(outW * 0.1);
@@ -476,10 +481,137 @@ async function run() {
         
         const finalWarped = window.processPerspectiveWarp(finalCanvas, 0, bestFineShear);
         
+        // --- SECOND WARP: Warp the ENTIRE original image using the same homography! ---
+        const invH = window.invertHomography(H);
+        
+        const mapPoint = (ih, px, py) => {
+          const denom = ih[6] * px + ih[7] * py + ih[8];
+          return {
+            x: (ih[0] * px + ih[1] * py + ih[2]) / denom,
+            y: (ih[3] * px + ih[4] * py + ih[5]) / denom
+          };
+        };
+        
+        const imgCorners = [
+          mapPoint(invH, 0, 0),
+          mapPoint(invH, w - 1, 0),
+          mapPoint(invH, 0, h - 1),
+          mapPoint(invH, w - 1, h - 1)
+        ];
+        
+        const minU = Math.min(...imgCorners.map(c => c.x));
+        const maxU = Math.max(...imgCorners.map(c => c.x));
+        const minV = Math.min(...imgCorners.map(c => c.y));
+        const maxV = Math.max(...imgCorners.map(c => c.y));
+        
+        const fullW = Math.round(maxU - minU);
+        const fullH = Math.round(maxV - minV);
+        
+        const fullCanvas = document.createElement('canvas');
+        fullCanvas.width = fullW;
+        fullCanvas.height = fullH;
+        const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
+        const fullImgData = fullCtx.createImageData(fullW, fullH);
+        const fullPixels = fullImgData.data;
+        
+        for (let v = 0; v < fullH; v++) {
+          for (let u = 0; u < fullW; u++) {
+            const destU = u + minU;
+            const destV = v + minV;
+            
+            const denom = H[6] * destU + H[7] * destV + H[8];
+            const srcX = Math.round((H[0] * destU + H[1] * destV + H[2]) / denom);
+            const srcY = Math.round((H[3] * destU + H[4] * destV + H[5]) / denom);
+            
+            const destIdx = (v * fullW + u) * 4;
+            if (srcX >= 0 && srcX < w && srcY >= 0 && srcY < h) {
+              const srcIdx = (srcY * w + srcX) * 4;
+              fullPixels[destIdx] = data[srcIdx];
+              fullPixels[destIdx+1] = data[srcIdx+1];
+              fullPixels[destIdx+2] = data[srcIdx+2];
+              fullPixels[destIdx+3] = data[srcIdx+3];
+            } else {
+              fullPixels[destIdx+3] = 0;
+            }
+          }
+        }
+        fullCtx.putImageData(fullImgData, 0, 0);
+        
+        const finalFullCanvas = document.createElement('canvas');
+        finalFullCanvas.width = fullW;
+        finalFullCanvas.height = fullH;
+        const finalFullCtx = finalFullCanvas.getContext('2d', { willReadFrequently: true });
+        
+        finalFullCtx.clearRect(0, 0, fullW, fullH);
+        finalFullCtx.save();
+        finalFullCtx.translate(fullW / 2, fullH / 2);
+        finalFullCtx.rotate((bestFineAngle * Math.PI) / 180);
+        finalFullCtx.drawImage(fullCanvas, -fullW / 2, -fullH / 2);
+        finalFullCtx.restore();
+        
+        const finalFullWarped = window.processPerspectiveWarp(finalFullCanvas, 0, bestFineShear);
+        
+        // --- PASS 7: Crop to Peripheral Bounds ---
+        // Find the bounding box of all active foreground pixels in the warped image
+        const finalFullWarpedCtx = finalFullWarped.getContext('2d', { willReadFrequently: true });
+        const finalFullData = finalFullWarpedCtx.getImageData(0, 0, fullW, fullH).data;
+        
+        let activeMinU = fullW, activeMaxU = 0;
+        let activeMinV = fullH, activeMaxV = 0;
+        let hasActive = false;
+        
+        for (let v = 0; v < fullH; v++) {
+          for (let u = 0; u < fullW; u++) {
+            const idx = (v * fullW + u) * 4;
+            if (finalFullData[idx+3] >= 50) { // Active pixel (not transparent)
+              if (u < activeMinU) activeMinU = u;
+              if (u > activeMaxU) activeMaxU = u;
+              if (v < activeMinV) activeMinV = v;
+              if (v > activeMaxV) activeMaxV = v;
+              hasActive = true;
+            }
+          }
+        }
+        
+        if (!hasActive) {
+          activeMinU = 0; activeMaxU = fullW - 1;
+          activeMinV = 0; activeMaxV = fullH - 1;
+        }
+        
+        // Add a tiny padding margin around the peripheral crop (e.g. 5 pixels)
+        const cropMargin = 5;
+        const cropU = Math.max(0, activeMinU - cropMargin);
+        const cropV = Math.max(0, activeMinV - cropMargin);
+        const cropW = Math.min(fullW - cropU, (activeMaxU - activeMinU + 1) + 2 * cropMargin);
+        const cropH = Math.min(fullH - cropV, (activeMaxV - activeMinV + 1) + 2 * cropMargin);
+        
+        const croppedCanvas = document.createElement('canvas');
+        croppedCanvas.width = cropW;
+        croppedCanvas.height = cropH;
+        const croppedCtx = croppedCanvas.getContext('2d', { willReadFrequently: true });
+        croppedCtx.drawImage(finalFullWarped, cropU, cropV, cropW, cropH, 0, 0, cropW, cropH);
+        
+        // Recalculate original PCB's bounds relative to this new cropped canvas
+        const pcbLeftRel = Math.round(0 - minU);
+        const pcbTopRel = Math.round(0 - minV);
+        
+        // Shift them by the crop origin
+        const finalPcbLeft = pcbLeftRel - cropU;
+        const finalPcbTop = pcbTopRel - cropV;
+        
         return {
           width: outW,
           height: outH,
-          dataUrl: finalWarped.toDataURL()
+          dataUrl: finalWarped.toDataURL(),
+          fullWidth: cropW,
+          fullHeight: cropH,
+          fullDataUrl: croppedCanvas.toDataURL(),
+          pcbBounds: {
+            left: finalPcbLeft,
+            top: finalPcbTop,
+            width: outW,
+            height: outH
+          }
         };
       } catch (err) {
         console.error(err);
@@ -509,10 +641,16 @@ async function run() {
 
     console.log(`[4/4] Calibration and projective warp succeeded!`);
     console.log(`Output Image Dimensions: ${result.width}x${result.height}`);
+    console.log(`Cropped Full Image Dimensions: ${result.fullWidth}x${result.fullHeight}`);
+    console.log(`PCB Bounds inside cropped image:`, JSON.stringify(result.pcbBounds));
 
     const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, "");
     fs.writeFileSync(OUTPUT_PATH, base64Data, 'base64');
     console.log(`Warped output image saved successfully to: ${OUTPUT_PATH}`);
+
+    const fullBase64Data = result.fullDataUrl.replace(/^data:image\/png;base64,/, "");
+    fs.writeFileSync(FULL_OUTPUT_PATH, fullBase64Data, 'base64');
+    console.log(`Warped FULL image saved successfully to: ${FULL_OUTPUT_PATH}`);
   } catch (err) {
     console.error(`Calibration runtime error inside page:`, err);
   }
