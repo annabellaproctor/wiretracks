@@ -158,8 +158,8 @@ async function run() {
 
     window.autoCalibrateAndWarp = (img, tolerance = 50) => {
       try {
-        const w = img.naturalWidth;
-        const h = img.naturalHeight;
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
         
         const rawCanvas = document.createElement('canvas');
         rawCanvas.width = w;
@@ -235,6 +235,85 @@ async function run() {
         console.log("Chromatic foreground pixels:", chromaticPixelCount, "use chromatic mode:", useChromatic);
         
         const boardMask = useChromatic ? pcbMask : new Uint8Array(w * h).map((_, idx) => 1 - isBackground[idx]);
+
+        // Color Saturation Check (reject monochrome schematic drawings)
+        let totalSaturation = 0;
+        let foregroundCount = 0;
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            if (isBackground[y * w + x] === 1) continue;
+            const idx = (y * w + x) * 4;
+            const r = data[idx];
+            const g = data[idx+1];
+            const b = data[idx+2];
+            const sat = Math.max(r, g, b) - Math.min(r, g, b);
+            totalSaturation += sat;
+            foregroundCount++;
+          }
+        }
+        const avgSaturation = foregroundCount > 0 ? (totalSaturation / foregroundCount) : 0;
+        console.log("Foreground pixel count:", foregroundCount, "average saturation:", avgSaturation);
+        
+        if (foregroundCount > 0 && avgSaturation < 8) {
+          throw new Error("Monochrome drawing/schematic detected (saturation: " + avgSaturation.toFixed(2) + "), rejecting.");
+        }
+        
+        // Foreground Area Ratio Check (reject empty/nearly empty frames)
+        const areaRatio = foregroundCount / (w * h);
+        if (foregroundCount > 0 && areaRatio < 0.01) {
+          throw new Error("Foreground area is too small (" + (areaRatio * 100).toFixed(2) + "% of canvas), rejecting.");
+        }
+        
+        // Auto-Crop Pre-Pass for Tiny Boards
+        let minX = w, maxX = 0;
+        let minY = h, maxY = 0;
+        let hasBoard = false;
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            if (boardMask[y * w + x] === 1) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+              hasBoard = true;
+            }
+          }
+        }
+        
+        if (!hasBoard) {
+          throw new Error("No PCB board mask detected!");
+        }
+        
+        const boardW = maxX - minX + 1;
+        const boardH = maxY - minY + 1;
+        const boardAreaRatio = (boardW * boardH) / (w * h);
+        console.log("Board mask bounds relative to canvas: w =", boardW, "h =", boardH, "ratio =", boardAreaRatio);
+        
+        // If the board occupies a small fraction of the image (e.g. < 35%), run auto-crop pre-pass
+        // but only if the width and height are reasonably large to avoid cropping noise
+        if (boardAreaRatio < 0.35 && w > 100 && h > 100) {
+          console.log("Board occupies only a small region of the canvas. Applying auto-crop pre-pass...");
+          const padX = Math.round(boardW * 0.05);
+          const padY = Math.round(boardH * 0.05);
+          
+          const cropX = Math.max(0, minX - padX);
+          const cropY = Math.max(0, minY - padY);
+          const cropW = Math.min(w - cropX, boardW + 2 * padX);
+          const cropH = Math.min(h - cropY, boardH + 2 * padY);
+          
+          const cropCanvas = document.createElement('canvas');
+          cropCanvas.width = cropW;
+          cropCanvas.height = cropH;
+          const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
+          cropCtx.drawImage(rawCanvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+          
+          const subRes = window.autoCalibrateAndWarp(cropCanvas, tolerance);
+          if (subRes) {
+            subRes.pcbBounds.left += cropX;
+            subRes.pcbBounds.top += cropY;
+            return subRes;
+          }
+        }
         
         // Find boundary points of the blue PCB mask
         const boundaryPoints = [];
@@ -418,6 +497,8 @@ async function run() {
         let bestFineAngle = 0;
         let bestFineShear = 0;
         let maxVar = 0;
+        let totalVar = 0;
+        let varCount = 0;
         
         const fineCanvas = document.createElement('canvas');
         fineCanvas.width = outW;
@@ -457,6 +538,9 @@ async function run() {
             const mean = subGradients.reduce((a, b) => a + b, 0) / subGradients.length;
             const variance = subGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / subGradients.length;
             
+            totalVar += variance;
+            varCount++;
+            
             if (variance > maxVar) {
               maxVar = variance;
               bestFineAngle = angle;
@@ -465,7 +549,9 @@ async function run() {
           }
         }
         
-        console.log("Optimal fine rotation:", bestFineAngle, "fine shear:", bestFineShear);
+        const avgVar = varCount > 0 ? (totalVar / varCount) : 1;
+        const confidenceRatio = maxVar / avgVar;
+        console.log("Optimal fine rotation:", bestFineAngle, "fine shear:", bestFineShear, "Confidence ratio:", confidenceRatio.toFixed(3));
         
         const finalCanvas = document.createElement('canvas');
         finalCanvas.width = outW;
