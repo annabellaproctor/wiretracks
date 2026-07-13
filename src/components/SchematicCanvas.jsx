@@ -1217,11 +1217,11 @@ export default function SchematicCanvas({
             
             if (side === 'left' || side === 'right') {
               if (side === 'left') {
-                startX = Math.round(w * 0.04);
-                endX = Math.round(w * 0.16);
+                startX = Math.round(w * 0.01);
+                endX = Math.round(w * 0.12);
               } else {
-                startX = Math.round(w * 0.84);
-                endX = Math.round(w * 0.96);
+                startX = Math.round(w * 0.88);
+                endX = Math.round(w * 0.99);
               }
               const stripW = Math.max(1, endX - startX);
               for (let y = 0; y < h; y++) {
@@ -2084,14 +2084,16 @@ export default function SchematicCanvas({
               const maxY = comp.height * endPctVal + 10;
               if (relY >= minY && relY <= maxY) {
                 hasPhysicalDot = true;
-                dotX = comp.x + comp.width * (isLeft ? startPctVal : endPctVal);
+                const horizPct = 0.04;
+                dotX = comp.x + comp.width * (isLeft ? horizPct : (1 - horizPct));
               }
             } else if (isUp || isDown) {
               const minX = comp.width * startPctVal - 10;
               const maxX = comp.width * endPctVal + 10;
               if (relX >= minX && relX <= maxX) {
                 hasPhysicalDot = true;
-                dotY = comp.y + comp.height * (isUp ? startPctVal : endPctVal);
+                const vertPct = 0.04;
+                dotY = comp.y + comp.height * (isUp ? vertPct : (1 - vertPct));
               }
             }
           }

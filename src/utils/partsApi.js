@@ -331,9 +331,8 @@ export async function searchPartsUnified(query, provider = 'all') {
       const [easyeda, lcsc, jlc] = tier1Results;
 
       const totalTier1Results = (easyeda?.length || 0) + (lcsc?.length || 0) + (jlc?.length || 0);
-      const anyTier1Failed = !easyeda || !lcsc || !jlc;
 
-      if (totalTier1Results > 0 && !anyTier1Failed) {
+      if (totalTier1Results > 0) {
         // Tier 1 succeeded and returned component matches!
         if (easyeda) results.push(...easyeda);
         if (lcsc) results.push(...lcsc);
