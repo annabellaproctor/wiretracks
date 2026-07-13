@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+@theme {
+  --color-parchment-light: #fdfcfb;
+  --color-parchment: #f9f6f0;
+  --color-parchment-dark: #f3ede0;
+  --color-parchment-grid-minor: #e8e2d5;
+  --color-parchment-grid-major: #d4cbba;
+  
+  --color-engineering-slate: #475569;
+  --color-engineering-charcoal: #1e293b;
+  --color-engineering-border: #cbd5e1;
+  --color-engineering-bg: #f1f5f9;
+  --color-engineering-dark: #0f172a;
+  
+  --color-copper-light: #fbbf24;
+  --color-copper: #d97706;
+  --color-copper-dark: #b45309;
+  
+  --color-trace-blue: #3b82f6;
+  --color-trace-green: #10b981;
+  --color-trace-gold: #f59e0b;
+
+  --font-sans: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+@layer base {
+  html, body, #root {
+    overscroll-behavior: none;
+    overscroll-behavior-x: none;
+    overscroll-behavior-y: none;
+  }
+  body {
+    @apply bg-engineering-bg text-engineering-charcoal font-sans antialiased overflow-hidden h-screen w-screen;
+  }
+}
+
+/* Parchment Grid CSS classes */
+.parchment-grid {
+  background-color: #fbf9f5;
+  background-image: 
+    linear-gradient(#f1ebde 1px, transparent 1px),
+    linear-gradient(90deg, #f1ebde 1px, transparent 1px),
+    linear-gradient(#e3d9c5 1.5px, transparent 1.5px),
+    linear-gradient(90deg, #e3d9c5 1.5px, transparent 1.5px);
+  background-size: 15px 15px, 15px 15px, 75px 75px, 75px 75px;
+  background-position: -0.5px -0.5px, -0.5px -0.5px, -1px -1px, -1px -1px;
+}
+
+.dark-grid {
+  background-color: #0f172a;
+  background-image: 
+    linear-gradient(#1e293b 1px, transparent 1px),
+    linear-gradient(90deg, #1e293b 1px, transparent 1px),
+    linear-gradient(#334155 1.5px, transparent 1.5px),
+    linear-gradient(90deg, #334155 1.5px, transparent 1.5px);
+  background-size: 15px 15px, 15px 15px, 75px 75px, 75px 75px;
+  background-position: -0.5px -0.5px, -0.5px -0.5px, -1px -1px, -1px -1px;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-300 rounded-full hover:bg-slate-400;
+}
+
+/* Pulse animation for running/simulated items */
+@keyframes wire-pulse {
+  0% { stroke-dashoffset: 24; }
+  100% { stroke-dashoffset: 0; }
+}
+
+.wire-animated {
+  stroke-dasharray: 8, 4;
+  animation: wire-pulse 2s linear infinite;
+}
+
+/* Glassmorphism panel styles */
+.glass-panel {
+  @apply bg-white/90 backdrop-blur-md border border-slate-200 shadow-sm;
+}
