@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, ShoppingCart, Check, AlertCircle, Loader2, Download, Zap, Landmark, HelpCircle, Layers } from 'lucide-react';
-import { searchPartsUnified, searchComponentImages, rankSearchResultsWithAI } from '../utils/partsApi';
+import { searchPartsUnified, searchComponentImages } from '../utils/partsApi';
 import { sendToRouter } from '../utils/openRouter';
+import { autoHeuristicPinoutMap } from '../utils/pinoutHeuristic';
 
 function MiniFootprintPreview({ packageType, partNumber }) {
   const canvasRef = useRef(null);
@@ -104,7 +105,6 @@ export default function SidebarPartsSearch({
   const [loading, setLoading] = useState(false);
   const [importingLcscId, setImportingLcscId] = useState(null);
   const [selectedProvider, setSelectedProvider] = useState('all');
-  const [aiSearchEnabled, setAiSearchEnabled] = useState(true);
   const [expandedPartIdx, setExpandedPartIdx] = useState(null);
   
   const selectedComp = components.find(c => c.id === selectedComponentId);
@@ -193,6 +193,61 @@ export default function SidebarPartsSearch({
     }
   ];
 
+  const rankSearchResultsHeuristically = (queryText, results) => {
+    if (!results || results.length === 0) return [];
+    const q = queryText.toLowerCase().trim();
+    
+    return [...results].map(part => {
+      let score = 0;
+      const partNumber = (part.partNumber || '').toLowerCase();
+      const mfr = (part.mfr || '').toLowerCase();
+      const desc = (part.description || '').toLowerCase();
+      
+      // Rule 1: Part number exact match
+      if (partNumber === q) {
+        score += 1000;
+      }
+      // Rule 2: Part number prefix match
+      else if (partNumber.startsWith(q)) {
+        score += 500;
+      }
+      // Rule 3: Part number substring match
+      else if (partNumber.includes(q)) {
+        score += 200;
+      }
+      
+      // Rule 4: Manufacturer match
+      if (mfr.includes(q)) {
+        score += 50;
+      }
+      
+      // Rule 5: Description match (word by word)
+      const qWords = q.split(/\s+/).filter(Boolean);
+      qWords.forEach(word => {
+        if (desc.includes(word)) {
+          score += 30;
+        }
+      });
+      
+      // Rule 6: Provider source weighting
+      const source = (part.source || '').toLowerCase();
+      if (source.includes('digikey') || source.includes('mouser')) {
+        score += 40;
+      } else if (source.includes('easyeda') || source.includes('lcsc')) {
+        score += 30;
+      } else if (source.includes('google')) {
+        score += 10;
+      }
+      
+      // Rule 7: Stock/Availability bonus
+      if (desc.includes('in stock') || desc.includes('active') || part.stock > 0) {
+        score += 20;
+      }
+      
+      return { ...part, searchScore: score };
+    }).sort((a, b) => b.searchScore - a.searchScore);
+  };
+
   const handleSearch = async (e) => {
     e.preventDefault();
     if (!query.trim()) {
@@ -224,12 +279,9 @@ export default function SidebarPartsSearch({
         );
       }
 
-      // 3. AI ranking of consolidated specifications using direct Gemini free tier
-      if (aiSearchEnabled && rawResults.length > 0) {
-        const geminiKey = import.meta.env.VITE_GEMINI_FALLBACK_API_KEY || import.meta.env.VITE_GEMINI_FAgreLLBACK_API_KEY || '';
-        if (geminiKey) {
-          rawResults = await rankSearchResultsWithAI(query, rawResults, geminiKey);
-        }
+      // 3. Heuristic ranking of consolidated specifications
+      if (rawResults.length > 0) {
+        rawResults = rankSearchResultsHeuristically(query, rawResults);
       }
 
       const enriched = await Promise.all(
@@ -444,7 +496,8 @@ Example JSON:
       image: part.image || part.imageUrl || null
     };
 
-    setComponents(prev => [...prev, newComponent]);
+    const mappedComp = autoHeuristicPinoutMap(newComponent);
+    setComponents(prev => [...prev, mappedComp]);
     if (aiSpec) {
       alert(`[AI Self-healing CAD] Dynamically generated realistic footprint for "${part.partNumber}" with ${parsedPins.length} pins using Gemini!`);
     } else {
@@ -615,7 +668,8 @@ Example JSON:
         image: part.image || part.imageUrl || null
       };
 
-      setComponents(prev => [...prev, newComponent]);
+      const mappedComp = autoHeuristicPinoutMap(newComponent);
+      setComponents(prev => [...prev, mappedComp]);
       alert(`Imported ${part.partNumber} CAD models successfully via python bypass!\nAdded component ${newId} to active library.`);
     } catch (e) {
       console.error("[Import CAD] conversion error, self-healing...", e);
@@ -685,35 +739,26 @@ Example JSON:
           <button type="submit" className="hidden" />
         </form>
         
-        {/* Provider Selector and AI Toggle Switch */}
+        {/* Provider Selector */}
         <div className="flex items-center justify-between pt-1 text-[10px] text-slate-500 space-x-2">
           <div className="flex items-center space-x-1.5 flex-1">
             <span className="font-bold text-slate-400 uppercase tracking-wider text-[8px]">Index:</span>
             <select
               value={selectedProvider}
               onChange={(e) => setSelectedProvider(e.target.value)}
-              className="flex-1 bg-white border border-slate-200 rounded-md py-1 px-1.5 text-[10px] text-slate-650 outline-none focus:border-amber-500 transition cursor-pointer"
+              className="flex-1 bg-white border border-slate-200 rounded-md py-1 px-1.5 text-[10px] text-slate-650 outline-none focus:border-amber-500 transition cursor-pointer font-sans"
             >
-              <option value="all">Unified (All Indices)</option>
-              <option value="lcsc_official">LCSC Developer API</option>
-              <option value="digikey">DigiKey Search API</option>
-              <option value="mouser">Mouser Catalog API</option>
-              <option value="easyeda">EasyEDA Symbol Index</option>
-              <option value="amazon">Amazon (SerpApi)</option>
-              <option value="dataforseo">Amazon (DataForSEO)</option>
-              <option value="google_shopping">Google Shopping (GCP)</option>
-              <option value="lcsc_public">LCSC Public Fallback</option>
+              <option value="all">Unified (Automatic Search Routing)</option>
+              <option value="easyeda">EasyEDA (High Reputability, Unlimited Quota)</option>
+              <option value="lcsc_public">LCSC Fallback (High Reputability, Unlimited Quota)</option>
+              <option value="digikey">DigiKey API (Excellent Reputability, High Quota)</option>
+              <option value="mouser">Mouser API (Excellent Reputability, High Quota)</option>
+              <option value="lcsc_official">LCSC Official (High Reputability, Limited Quota)</option>
+              <option value="google_shopping">Google GCP (Moderate Reputability, Billed Quota)</option>
+              <option value="dataforseo">Amazon via DataForSEO (Low Reputability, Billed Quota)</option>
+              <option value="amazon">Amazon via SerpApi (Low Reputability, Billed Quota)</option>
             </select>
           </div>
-          <label className="flex items-center space-x-1 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={aiSearchEnabled}
-              onChange={(e) => setAiSearchEnabled(e.target.checked)}
-              className="rounded-sm border-slate-350 text-amber-500 focus:ring-amber-500/20 h-3 w-3 cursor-pointer"
-            />
-            <span className="font-bold text-slate-500 uppercase tracking-wider text-[8px] hover:text-slate-700">AI Rank</span>
-          </label>
         </div>
       </div>
 

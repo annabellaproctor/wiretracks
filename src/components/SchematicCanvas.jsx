@@ -2,789 +2,13 @@ import React, { useRef, useEffect, useState } from 'react';
 import { findOrthogonalPath } from '../utils/router';
 import { Lock, Unlock, Trash2, RotateCw, Settings, Search, Edit3, Navigation, Move, HelpCircle, Type, Square, Ruler, Layers } from 'lucide-react';
 import { searchComponentImages, searchJLCPartCode } from '../utils/partsApi';
-const processPerspectiveWarp = (srcCanvas, taperFactor = 0, shearFactor = 0) => {
-  if (taperFactor === 0 && shearFactor === 0) return srcCanvas;
-  
-  const w = srcCanvas.width;
-  const h = srcCanvas.height;
-  const destCanvas = document.createElement('canvas');
-  destCanvas.width = w;
-  destCanvas.height = h;
-  const destCtx = destCanvas.getContext('2d', { willReadFrequently: true });
-  
-  const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
-  const srcData = srcCtx.getImageData(0, 0, w, h);
-  const destData = destCtx.createImageData(w, h);
-  
-  const srcPixels = srcData.data;
-  const destPixels = destData.data;
-  
-  const centerX = w / 2;
-  
-  for (let y = 0; y < h; y++) {
-    // taperFactor scales horizontal span linearly from top to bottom
-    const taper = 1 + taperFactor * (y / h - 0.5);
-    // shearFactor shifts rows horizontally relative to center vertical line
-    const shearOffset = shearFactor * (y - h / 2);
-    
-    for (let x = 0; x < w; x++) {
-      const srcX = Math.round(centerX + (x - centerX) * taper + shearOffset);
-      const destIdx = (y * w + x) * 4;
-      
-      if (srcX >= 0 && srcX < w) {
-        const srcIdx = (y * w + srcX) * 4;
-        destPixels[destIdx] = srcPixels[srcIdx];
-        destPixels[destIdx+1] = srcPixels[srcIdx+1];
-        destPixels[destIdx+2] = srcPixels[srcIdx+2];
-        destPixels[destIdx+3] = srcPixels[srcIdx+3];
-      } else {
-        destPixels[destIdx+3] = 0; // Out of bounds is transparent
-      }
-    }
-  }
-  
-  destCtx.putImageData(destData, 0, 0);
-  return destCanvas;
-};
+import { sendToRouter } from '../utils/openRouter';
 
-const processImageBackground = (img, tolerance = 20, doCrop = true, deskewAngle = 0, subCrop = { x: 0, y: 0, w: 100, h: 100 }, taperFactor = 0, shearFactor = 0) => {
-  try {
-    if (!img || img.naturalWidth === 0) return null;
-    
-    // 1. First, crop to user-selected sub-region (if not 0, 0, 100, 100)
-    let preCropCanvas = document.createElement('canvas');
-    let preCropCtx = preCropCanvas.getContext('2d', { willReadFrequently: true });
-    
-    const sX = subCrop && subCrop.x !== undefined ? subCrop.x : 0;
-    const sY = subCrop && subCrop.y !== undefined ? subCrop.y : 0;
-    const sW = subCrop && subCrop.w !== undefined ? subCrop.w : 100;
-    const sH = subCrop && subCrop.h !== undefined ? subCrop.h : 100;
-    
-    const cropX = Math.round((sX / 100) * img.naturalWidth);
-    const cropY = Math.round((sY / 100) * img.naturalHeight);
-    const cropW = Math.max(10, Math.round((sW / 100) * img.naturalWidth));
-    const cropH = Math.max(10, Math.round((sH / 100) * img.naturalHeight));
-    
-    preCropCanvas.width = cropW;
-    preCropCanvas.height = cropH;
-    preCropCtx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-    
-    // 2. Next, rotate/deskew the pre-cropped region
-    let workingCanvas = document.createElement('canvas');
-    let workingCtx = workingCanvas.getContext('2d', { willReadFrequently: true });
-    
-    if (deskewAngle !== 0) {
-      const angleRad = (deskewAngle * Math.PI) / 180;
-      const absCos = Math.abs(Math.cos(angleRad));
-      const absSin = Math.abs(Math.sin(angleRad));
-      
-      const newWidth = Math.round(cropW * absCos + cropH * absSin);
-      const newHeight = Math.round(cropW * absSin + cropH * absCos);
-      
-      workingCanvas.width = newWidth;
-      workingCanvas.height = newHeight;
-      
-      workingCtx.translate(newWidth / 2, newHeight / 2);
-      workingCtx.rotate(angleRad);
-      workingCtx.drawImage(preCropCanvas, -cropW / 2, -cropH / 2);
-    } else {
-      workingCanvas.width = cropW;
-      workingCanvas.height = cropH;
-      workingCtx.drawImage(preCropCanvas, 0, 0);
-    }
-    
-    const imgData = workingCtx.getImageData(0, 0, workingCanvas.width, workingCanvas.height);
-    const data = imgData.data;
-    
-    // Robust perimeter background sampling (immune to local border/text noise)
-    const preCropImgData = preCropCtx.getImageData(0, 0, cropW, cropH);
-    const preCropPixels = preCropImgData.data;
-    
-    let sumR = 0, sumG = 0, sumB = 0, sumCount = 0;
-    const edgePad = Math.max(2, Math.round(Math.min(cropW, cropH) * 0.02));
-    
-    // Sample top and bottom rows
-    for (let x = edgePad; x < cropW - edgePad; x += Math.max(1, Math.round(cropW / 30))) {
-      const idxTop = (edgePad * cropW + x) * 4;
-      const idxBot = ((cropH - edgePad - 1) * cropW + x) * 4;
-      sumR += preCropPixels[idxTop] + preCropPixels[idxBot];
-      sumG += preCropPixels[idxTop+1] + preCropPixels[idxBot+1];
-      sumB += preCropPixels[idxTop+2] + preCropPixels[idxBot+2];
-      sumCount += 2;
-    }
-    // Sample left and right columns
-    for (let y = edgePad; y < cropH - edgePad; y += Math.max(1, Math.round(cropH / 30))) {
-      const idxLeft = (y * cropW + edgePad) * 4;
-      const idxRight = (y * cropW + cropW - edgePad - 1) * 4;
-      sumR += preCropPixels[idxLeft] + preCropPixels[idxRight];
-      sumG += preCropPixels[idxLeft+1] + preCropPixels[idxRight+1];
-      sumB += preCropPixels[idxLeft+2] + preCropPixels[idxRight+2];
-      sumCount += 2;
-    }
-    const bgR = sumCount > 0 ? Math.round(sumR / sumCount) : 255;
-    const bgG = sumCount > 0 ? Math.round(sumG / sumCount) : 255;
-    const bgB = sumCount > 0 ? Math.round(sumB / sumCount) : 255;
-    
-    if (tolerance > 0) {
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i];
-        const g = data[i+1];
-        const b = data[i+2];
-        const a = data[i+3];
-        
-        // Skip already transparent pixels from rotation border spacing
-        if (a === 0) continue;
-        
-        const dist = Math.sqrt(
-          Math.pow(r - bgR, 2) +
-          Math.pow(g - bgG, 2) +
-          Math.pow(b - bgB, 2)
-        );
-        if (dist < tolerance) {
-          data[i+3] = 0; // Transparent
-        }
-      }
-      workingCtx.putImageData(imgData, 0, 0);
-    }
-    
-    // Apply perspective taper/shear warp if taperFactor !== 0 or shearFactor !== 0
-    if (taperFactor !== 0 || shearFactor !== 0) {
-      workingCanvas = processPerspectiveWarp(workingCanvas, taperFactor, shearFactor);
-      workingCtx = workingCanvas.getContext('2d', { willReadFrequently: true });
-    }
-    
-    if (doCrop && tolerance > 0) {
-      let minX = workingCanvas.width;
-      let minY = workingCanvas.height;
-      let maxX = 0;
-      let maxY = 0;
-      let hasPixels = false;
-      
-      for (let y = 0; y < workingCanvas.height; y++) {
-        for (let x = 0; x < workingCanvas.width; x++) {
-          const alpha = data[(y * workingCanvas.width + x) * 4 + 3];
-          if (alpha > 10) {
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-            hasPixels = true;
-          }
-        }
-      }
-      
-      if (hasPixels && (minX > 0 || minY > 0 || maxX < workingCanvas.width - 1 || maxY < workingCanvas.height - 1)) {
-        const finalW = maxX - minX + 1;
-        const finalH = maxY - minY + 1;
-        const cropCanvas = document.createElement('canvas');
-        cropCanvas.width = finalW;
-        cropCanvas.height = finalH;
-        const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
-        cropCtx.drawImage(workingCanvas, minX, minY, finalW, finalH, 0, 0, finalW, finalH);
-        return cropCanvas;
-      }
-    }
-    
-    return workingCanvas;
-  } catch (err) {
-    console.error("[processImageBackground] caught CORS or drawing exception:", err);
-    return img;
-  }
-};
+// --- CAD Component Layout Helpers ---
 
-const autoCalibrateImageSkin = (img, tolerance = 20) => {
-  try {
-    if (!img || img.naturalWidth === 0) return null;
-    
-    // Use a higher resolution (300px max) to preserve the thin header pins!
-    const scale = Math.min(1, 300 / Math.max(img.naturalWidth, img.naturalHeight));
-    const w = Math.round(img.naturalWidth * scale);
-    const h = Math.round(img.naturalHeight * scale);
-    
-    const testCanvas = document.createElement('canvas');
-    const testCtx = testCanvas.getContext('2d', { willReadFrequently: true });
-    
-    // --- PASS 1: Rough search (-90 to +90 degrees in 5-degree steps) ---
-    let bestAngle = 0;
-    let maxVariance = 0;
-    
-    for (let angle = -90; angle <= 90; angle += 5) {
-      const angleRad = (angle * Math.PI) / 180;
-      const absCos = Math.abs(Math.cos(angleRad));
-      const absSin = Math.abs(Math.sin(angleRad));
-      const rotW = Math.round(w * absCos + h * absSin);
-      const rotH = Math.round(w * absSin + h * absCos);
-      
-      testCanvas.width = rotW;
-      testCanvas.height = rotH;
-      
-      testCtx.clearRect(0, 0, rotW, rotH);
-      testCtx.save();
-      testCtx.translate(rotW / 2, rotH / 2);
-      testCtx.rotate(angleRad);
-      testCtx.drawImage(img, -w / 2, -h / 2, w, h);
-      testCtx.restore();
-      
-      const imgData = testCtx.getImageData(0, 0, rotW, rotH);
-      const data = imgData.data;
-      
-      // Calculate vertical gradients (horizontal brightness changes)
-      const colGradients = new Array(rotW).fill(0);
-      for (let y = 0; y < rotH; y++) {
-        for (let x = 0; x < rotW - 1; x++) {
-          const idx = (y * rotW + x) * 4;
-          const idxRight = (y * rotW + x + 1) * 4;
-          const b1 = (data[idx] + data[idx+1] + data[idx+2]) / 3;
-          const b2 = (data[idxRight] + data[idxRight+1] + data[idxRight+2]) / 3;
-          colGradients[x] += Math.abs(b2 - b1);
-        }
-      }
-      
-      const mean = colGradients.reduce((a, b) => a + b, 0) / rotW;
-      const variance = colGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / rotW;
-      if (variance > maxVariance) {
-        maxVariance = variance;
-        bestAngle = angle;
-      }
-    }
-    
-    // Early exit check: if rough alignment has very low variance, it is likely not a board/headers drawing
-    if (maxVariance < 150) {
-      console.log("[autoCalibrateImageSkin] Low rough variance, aborting early:", maxVariance);
-      return {
-        deskewAngle: 0,
-        taperFactor: 0,
-        shearFactor: 0,
-        subCropX: 0, subCropY: 0, subCropW: 100, subCropH: 100,
-        startMargin: 12, endMargin: 88,
-        confidence: Math.min(15, Math.round(maxVariance / 10)),
-        lowQuality: true
-      };
-    }
-    
-    // --- PASS 2: Fine search around bestAngle (-4 to +4 in 0.5-degree steps) ---
-    let fineBestAngle = bestAngle;
-    for (let angle = bestAngle - 4; angle <= bestAngle + 4; angle += 0.5) {
-      const angleRad = (angle * Math.PI) / 180;
-      const absCos = Math.abs(Math.cos(angleRad));
-      const absSin = Math.abs(Math.sin(angleRad));
-      const rotW = Math.round(w * absCos + h * absSin);
-      const rotH = Math.round(w * absSin + h * absCos);
-      
-      testCanvas.width = rotW;
-      testCanvas.height = rotH;
-      
-      testCtx.clearRect(0, 0, rotW, rotH);
-      testCtx.save();
-      testCtx.translate(rotW / 2, rotH / 2);
-      testCtx.rotate(angleRad);
-      testCtx.drawImage(img, -w / 2, -h / 2, w, h);
-      testCtx.restore();
-      
-      const imgData = testCtx.getImageData(0, 0, rotW, rotH);
-      const data = imgData.data;
-      
-      const colGradients = new Array(rotW).fill(0);
-      for (let y = 0; y < rotH; y++) {
-        for (let x = 0; x < rotW - 1; x++) {
-          const idx = (y * rotW + x) * 4;
-          const idxRight = (y * rotW + x + 1) * 4;
-          const b1 = (data[idx] + data[idx+1] + data[idx+2]) / 3;
-          const b2 = (data[idxRight] + data[idxRight+1] + data[idxRight+2]) / 3;
-          colGradients[x] += Math.abs(b2 - b1);
-        }
-      }
-      
-      const mean = colGradients.reduce((a, b) => a + b, 0) / rotW;
-      const variance = colGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / rotW;
-      if (variance > maxVariance) {
-        maxVariance = variance;
-        fineBestAngle = angle;
-      }
-    }
-    bestAngle = fineBestAngle;
-    
-    // 2. Perform deskew, transparency keying, and auto-crop to get bounds of the physical board
-    let deskewedCanvas = document.createElement('canvas');
-    let deskewedCtx = deskewedCanvas.getContext('2d', { willReadFrequently: true });
-    
-    let angleRad = (bestAngle * Math.PI) / 180;
-    let absCos = Math.abs(Math.cos(angleRad));
-    let absSin = Math.abs(Math.sin(angleRad));
-    let rotW = Math.round(img.naturalWidth * absCos + img.naturalHeight * absSin);
-    let rotH = Math.round(img.naturalWidth * absSin + img.naturalHeight * absCos);
-    
-    deskewedCanvas.width = rotW;
-    deskewedCanvas.height = rotH;
-    deskewedCtx.translate(rotW / 2, rotH / 2);
-    deskewedCtx.rotate(angleRad);
-    deskewedCtx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
-    
-    let rotData = deskewedCtx.getImageData(0, 0, rotW, rotH);
-    let rotPixels = rotData.data;
-    
-    // Robust perimeter background sampling (immune to local border/text noise)
-    let sumR = 0, sumG = 0, sumB = 0, sumA = 0, sumCount = 0;
-    const edgePad = Math.max(2, Math.round(Math.min(rotW, rotH) * 0.02));
-    
-    // Sample top and bottom rows
-    for (let x = edgePad; x < rotW - edgePad; x += Math.max(1, Math.round(rotW / 30))) {
-      const idxTop = (edgePad * rotW + x) * 4;
-      const idxBot = ((rotH - edgePad - 1) * rotW + x) * 4;
-      sumR += rotPixels[idxTop] + rotPixels[idxBot];
-      sumG += rotPixels[idxTop+1] + rotPixels[idxBot+1];
-      sumB += rotPixels[idxTop+2] + rotPixels[idxBot+2];
-      sumA += rotPixels[idxTop+3] + rotPixels[idxBot+3];
-      sumCount += 2;
-    }
-    // Sample left and right columns
-    for (let y = edgePad; y < rotH - edgePad; y += Math.max(1, Math.round(rotH / 30))) {
-      const idxLeft = (y * rotW + edgePad) * 4;
-      const idxRight = (y * rotW + rotW - edgePad - 1) * 4;
-      sumR += rotPixels[idxLeft] + rotPixels[idxRight];
-      sumG += rotPixels[idxLeft+1] + rotPixels[idxRight+1];
-      sumB += rotPixels[idxLeft+2] + rotPixels[idxRight+2];
-      sumA += rotPixels[idxLeft+3] + rotPixels[idxRight+3];
-      sumCount += 2;
-    }
-    const bgR = sumCount > 0 ? Math.round(sumR / sumCount) : 255;
-    const bgG = sumCount > 0 ? Math.round(sumG / sumCount) : 255;
-    const bgB = sumCount > 0 ? Math.round(sumB / sumCount) : 255;
-    const bgA = sumCount > 0 ? Math.round(sumA / sumCount) : 255;
-    const isBgTransparent = bgA < 50;
-    console.log("[autoCalibrateImageSkin] Detected background color:", bgR, bgG, bgB, "Alpha:", bgA, "Transparent:", isBgTransparent);
-    
-    let minX = rotW, minY = rotH, maxX = 0, maxY = 0;
-    let hasPixels = false;
-    
-    for (let y = 0; y < rotH; y++) {
-      for (let x = 0; x < rotW; x++) {
-        const idx = (y * rotW + x) * 4;
-        if (rotPixels[idx+3] < 50) continue;
-        
-        if (!isBgTransparent) {
-          const dist = Math.sqrt(
-            Math.pow(rotPixels[idx] - bgR, 2) +
-            Math.pow(rotPixels[idx+1] - bgG, 2) +
-            Math.pow(rotPixels[idx+2] - bgB, 2)
-          );
-          if (dist < tolerance) continue;
-        }
-        
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-        hasPixels = true;
-      }
-    }
-    
-    let subCrop = { x: 0, y: 0, w: 100, h: 100 };
-    if (hasPixels) {
-      subCrop = {
-        x: Math.round((minX / rotW) * 100),
-        y: Math.round((minY / rotH) * 100),
-        w: Math.round(((maxX - minX) / rotW) * 100),
-        h: Math.round(((maxY - minY) / rotH) * 100)
-      };
-    }
-    
-    // Enforce longways-vertical (portrait) layout!
-    if (hasPixels && (maxX - minX) > (maxY - minY)) {
-      bestAngle = (bestAngle + 90) % 360;
-      angleRad = (bestAngle * Math.PI) / 180;
-      absCos = Math.abs(Math.cos(angleRad));
-      absSin = Math.abs(Math.sin(angleRad));
-      rotW = Math.round(img.naturalWidth * absCos + img.naturalHeight * absSin);
-      rotH = Math.round(img.naturalWidth * absSin + img.naturalHeight * absCos);
-      
-      deskewedCanvas = document.createElement('canvas');
-      deskewedCanvas.width = rotW;
-      deskewedCanvas.height = rotH;
-      deskewedCtx = deskewedCanvas.getContext('2d', { willReadFrequently: true });
-      deskewedCtx.translate(rotW / 2, rotH / 2);
-      deskewedCtx.rotate(angleRad);
-      deskewedCtx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
-      
-      rotData = deskewedCtx.getImageData(0, 0, rotW, rotH);
-      rotPixels = rotData.data;
-      
-      minX = rotW; minY = rotH; maxX = 0; maxY = 0;
-      hasPixels = false;
-      
-      for (let y = 0; y < rotH; y++) {
-        for (let x = 0; x < rotW; x++) {
-          const idx = (y * rotW + x) * 4;
-          if (rotPixels[idx+3] < 50) continue;
-          
-          if (!isBgTransparent) {
-            const dist = Math.sqrt(
-              Math.pow(rotPixels[idx] - bgR, 2) +
-              Math.pow(rotPixels[idx+1] - bgG, 2) +
-              Math.pow(rotPixels[idx+2] - bgB, 2)
-            );
-            if (dist < tolerance) continue;
-          }
-          
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-          hasPixels = true;
-        }
-      }
-      
-      if (hasPixels) {
-        subCrop = {
-          x: Math.round((minX / rotW) * 100),
-          y: Math.round((minY / rotH) * 100),
-          w: Math.round(((maxX - minX) / rotW) * 100),
-          h: Math.round(((maxY - minY) / rotH) * 100)
-        };
-      }
-    }
-    
-    // --- PASS 3: Crop-focused Double-Run Refinement (-3 to +3 in 0.1-degree steps) ---
-    // This runs directly on the isolated board region to maximize precision!
-    let refineBestAngle = 0;
-    let refineMaxVariance = 0;
-    
-    const cropW = maxX - minX + 1;
-    const cropH = maxY - minY + 1;
-    const cropTestCanvas = document.createElement('canvas');
-    cropTestCanvas.width = cropW;
-    cropTestCanvas.height = cropH;
-    const cropTestCtx = cropTestCanvas.getContext('2d', { willReadFrequently: true });
-    cropTestCtx.drawImage(deskewedCanvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
-    
-    const refScale = Math.min(1, 200 / Math.max(cropW, cropH));
-    const refW = Math.round(cropW * refScale);
-    const refH = Math.round(cropH * refScale);
-    
-    const refCanvas = document.createElement('canvas');
-    const refCtx = refCanvas.getContext('2d', { willReadFrequently: true });
-    
-    for (let dAngle = -3; dAngle <= 3; dAngle += 0.1) {
-      const angleRadRef = (dAngle * Math.PI) / 180;
-      const absCosRef = Math.abs(Math.cos(angleRadRef));
-      const absSinRef = Math.abs(Math.sin(angleRadRef));
-      const rotWRef = Math.round(refW * absCosRef + refH * absSinRef);
-      const rotHRef = Math.round(refW * absSinRef + refH * absCosRef);
-      
-      refCanvas.width = rotWRef;
-      refCanvas.height = rotHRef;
-      
-      refCtx.clearRect(0, 0, rotWRef, rotHRef);
-      refCtx.save();
-      refCtx.translate(rotWRef / 2, rotHRef / 2);
-      refCtx.rotate(angleRadRef);
-      refCtx.drawImage(cropTestCanvas, -refW / 2, -refH / 2, refW, refH);
-      refCtx.restore();
-      
-      const imgDataRef = refCtx.getImageData(0, 0, rotWRef, rotHRef);
-      const dataRef = imgDataRef.data;
-      
-      const colGradientsRef = new Array(rotWRef).fill(0);
-      for (let y = Math.round(rotHRef * 0.15); y < Math.round(rotHRef * 0.85); y++) {
-        for (let x = 0; x < rotWRef - 1; x++) {
-          const idx = (y * rotWRef + x) * 4;
-          const idxRight = (y * rotWRef + x + 1) * 4;
-          const b1 = (dataRef[idx] + dataRef[idx+1] + dataRef[idx+2]) / 3;
-          const b2 = (dataRef[idxRight] + dataRef[idxRight+1] + dataRef[idxRight+2]) / 3;
-          colGradientsRef[x] += Math.abs(b2 - b1);
-        }
-      }
-      
-      const meanRef = colGradientsRef.reduce((a, b) => a + b, 0) / rotWRef;
-      const varianceRef = colGradientsRef.reduce((sum, val) => sum + Math.pow(val - meanRef, 2), 0) / rotWRef;
-      if (varianceRef > refineMaxVariance) {
-        refineMaxVariance = varianceRef;
-        refineBestAngle = dAngle;
-      }
-    }
-    
-    // Apply final sub-degree refinement
-    bestAngle = (bestAngle + refineBestAngle) % 360;
-    
-    // Re-crop final board at refined best angle
-    angleRad = (bestAngle * Math.PI) / 180;
-    absCos = Math.abs(Math.cos(angleRad));
-    absSin = Math.abs(Math.sin(angleRad));
-    rotW = Math.round(img.naturalWidth * absCos + img.naturalHeight * absSin);
-    rotH = Math.round(img.naturalWidth * absSin + img.naturalHeight * absCos);
-    
-    deskewedCanvas = document.createElement('canvas');
-    deskewedCanvas.width = rotW;
-    deskewedCanvas.height = rotH;
-    deskewedCtx = deskewedCanvas.getContext('2d', { willReadFrequently: true });
-    deskewedCtx.translate(rotW / 2, rotH / 2);
-    deskewedCtx.rotate(angleRad);
-    deskewedCtx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
-    
-    rotData = deskewedCtx.getImageData(0, 0, rotW, rotH);
-    rotPixels = rotData.data;
-    
-    minX = rotW; minY = rotH; maxX = 0; maxY = 0;
-    hasPixels = false;
-    
-    for (let y = 0; y < rotH; y++) {
-      for (let x = 0; x < rotW; x++) {
-        const idx = (y * rotW + x) * 4;
-        if (rotPixels[idx+3] < 50) continue;
-        
-        if (!isBgTransparent) {
-          const dist = Math.sqrt(
-            Math.pow(rotPixels[idx] - bgR, 2) +
-            Math.pow(rotPixels[idx+1] - bgG, 2) +
-            Math.pow(rotPixels[idx+2] - bgB, 2)
-          );
-          if (dist < tolerance) continue;
-        }
-        
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-        hasPixels = true;
-      }
-    }
-    
-    if (hasPixels) {
-      subCrop = {
-        x: Math.round((minX / rotW) * 100),
-        y: Math.round((minY / rotH) * 100),
-        w: Math.round(((maxX - minX) / rotW) * 100),
-        h: Math.round(((maxY - minY) / rotH) * 100)
-      };
-    }
-    
-    // 3. Find left/right margins for pin headers in the cropped image
-    const finalW = maxX - minX + 1;
-    const finalH = maxY - minY + 1;
-    const boardCanvas = document.createElement('canvas');
-    boardCanvas.width = finalW;
-    boardCanvas.height = finalH;
-    const boardCtx = boardCanvas.getContext('2d', { willReadFrequently: true });
-    boardCtx.drawImage(deskewedCanvas, minX, minY, finalW, finalH, 0, 0, finalW, finalH);
-    
-    const boardData = boardCtx.getImageData(0, 0, finalW, finalH).data;
-    
-    const colContrast = new Array(finalW).fill(0);
-    for (let x = 0; x < finalW; x++) {
-      for (let y = 1; y < finalH - 1; y++) {
-        const idx = (y * finalW + x) * 4;
-        const idxAbove = ((y - 1) * finalW + x) * 4;
-        const diff = Math.abs(boardData[idx] - boardData[idxAbove]) + 
-                     Math.abs(boardData[idx+1] - boardData[idxAbove+1]) + 
-                     Math.abs(boardData[idx+2] - boardData[idxAbove+2]);
-        colContrast[x] += diff;
-      }
-    }
-    
-    const smooth = [...colContrast];
-    for (let i = 2; i < finalW - 2; i++) {
-      smooth[i] = (colContrast[i-2] + colContrast[i-1] + colContrast[i] + colContrast[i+1] + colContrast[i+2]) / 5;
-    }
-    
-    let leftPeakIdx = Math.round(finalW * 0.12);
-    let leftMax = 0;
-    for (let x = Math.round(finalW * 0.05); x < Math.round(finalW * 0.40); x++) {
-      if (smooth[x] > leftMax) {
-        leftMax = smooth[x];
-        leftPeakIdx = x;
-      }
-    }
-    
-    let rightPeakIdx = Math.round(finalW * 0.88);
-    let rightMax = 0;
-    for (let x = Math.round(finalW * 0.60); x < Math.round(finalW * 0.95); x++) {
-      if (smooth[x] > rightMax) {
-        rightMax = smooth[x];
-        rightPeakIdx = x;
-      }
-    }
-    
-    const startMargin = Math.round((leftPeakIdx / finalW) * 100);
-    const endMargin = Math.round((rightPeakIdx / finalW) * 100);
-    
-    // --- PASS 4: Perspective Taper Correction Search ---
-    let bestTaper = 0;
-    let maxTaperVariance = 0;
-    
-    const warpTestCanvas = document.createElement('canvas');
-    warpTestCanvas.width = finalW;
-    warpTestCanvas.height = finalH;
-    const warpTestCtx = warpTestCanvas.getContext('2d', { willReadFrequently: true });
-    warpTestCtx.drawImage(deskewedCanvas, minX, minY, finalW, finalH, 0, 0, finalW, finalH);
-    
-    const innerStart = Math.round(finalW * 0.1);
-    const innerEnd = Math.round(finalW * 0.9);
-    
-    for (let taper = -0.35; taper <= 0.35; taper += 0.01) {
-      const warped = processPerspectiveWarp(warpTestCanvas, taper, 0);
-      const warpedData = warped.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH).data;
-      
-      const colGradients = new Array(finalW).fill(0);
-      for (let y = Math.round(finalH * 0.15); y < Math.round(finalH * 0.85); y++) {
-        for (let x = innerStart; x < innerEnd; x++) {
-          const idx = (y * finalW + x) * 4;
-          const idxRight = (y * finalW + x + 1) * 4;
-          if (warpedData[idx+3] < 50 || warpedData[idxRight+3] < 50) continue;
-          
-          const b1 = (warpedData[idx] + warpedData[idx+1] + warpedData[idx+2]) / 3;
-          const b2 = (warpedData[idxRight] + warpedData[idxRight+1] + warpedData[idxRight+2]) / 3;
-          colGradients[x] += Math.abs(b2 - b1);
-        }
-      }
-      
-      const subGradients = colGradients.slice(innerStart, innerEnd);
-      const mean = subGradients.reduce((a, b) => a + b, 0) / subGradients.length;
-      const variance = subGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / subGradients.length;
-      
-      if (variance > maxTaperVariance) {
-        maxTaperVariance = variance;
-        bestTaper = taper;
-      }
-    }
-    
-    // --- PASS 5: Perspective Shear Correction Search ---
-    let bestShear = 0;
-    let maxShearVariance = 0;
-    
-    for (let shear = -0.20; shear <= 0.20; shear += 0.01) {
-      const warped = processPerspectiveWarp(warpTestCanvas, bestTaper, shear);
-      const warpedData = warped.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH).data;
-      
-      const colGradients = new Array(finalW).fill(0);
-      for (let y = Math.round(finalH * 0.15); y < Math.round(finalH * 0.85); y++) {
-        for (let x = innerStart; x < innerEnd; x++) {
-          const idx = (y * finalW + x) * 4;
-          const idxRight = (y * finalW + x + 1) * 4;
-          if (warpedData[idx+3] < 50 || warpedData[idxRight+3] < 50) continue;
-          
-          const b1 = (warpedData[idx] + warpedData[idx+1] + warpedData[idx+2]) / 3;
-          const b2 = (warpedData[idxRight] + warpedData[idxRight+1] + warpedData[idxRight+2]) / 3;
-          colGradients[x] += Math.abs(b2 - b1);
-        }
-      }
-      
-      const subGradients = colGradients.slice(innerStart, innerEnd);
-      const mean = subGradients.reduce((a, b) => a + b, 0) / subGradients.length;
-      const variance = subGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / subGradients.length;
-      
-      if (variance > maxShearVariance) {
-        maxShearVariance = variance;
-        bestShear = shear;
-      }
-    }
-    
-    // --- PASS 6: Final Fine Rotation Refinement ---
-    let finalFineAngle = 0;
-    let maxFineVariance = 0;
-    
-    const fineTestCanvas = document.createElement('canvas');
-    fineTestCanvas.width = finalW;
-    fineTestCanvas.height = finalH;
-    const fineTestCtx = fineTestCanvas.getContext('2d', { willReadFrequently: true });
-    
-    const warpedBoard = processPerspectiveWarp(warpTestCanvas, bestTaper, bestShear);
-    
-    for (let fineAngle = -1.5; fineAngle <= 1.5; fineAngle += 0.1) {
-      const fineAngleRad = (fineAngle * Math.PI) / 180;
-      fineTestCanvas.width = finalW;
-      fineTestCanvas.height = finalH;
-      fineTestCtx.clearRect(0, 0, finalW, finalH);
-      fineTestCtx.save();
-      fineTestCtx.translate(finalW / 2, finalH / 2);
-      fineTestCtx.rotate(fineAngleRad);
-      fineTestCtx.drawImage(warpedBoard, -finalW / 2, -finalH / 2);
-      fineTestCtx.restore();
-      
-      const warpedData = fineTestCtx.getImageData(0, 0, finalW, finalH).data;
-      
-      const colGradients = new Array(finalW).fill(0);
-      for (let y = Math.round(finalH * 0.15); y < Math.round(finalH * 0.85); y++) {
-        for (let x = innerStart; x < innerEnd; x++) {
-          const idx = (y * finalW + x) * 4;
-          const idxRight = (y * finalW + x + 1) * 4;
-          if (warpedData[idx+3] < 50 || warpedData[idxRight+3] < 50) continue;
-          
-          const b1 = (warpedData[idx] + warpedData[idx+1] + warpedData[idx+2]) / 3;
-          const b2 = (warpedData[idxRight] + warpedData[idxRight+1] + warpedData[idxRight+2]) / 3;
-          colGradients[x] += Math.abs(b2 - b1);
-        }
-      }
-      
-      const subGradients = colGradients.slice(innerStart, innerEnd);
-      const mean = subGradients.reduce((a, b) => a + b, 0) / subGradients.length;
-      const variance = subGradients.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / subGradients.length;
-      
-      if (variance > maxFineVariance) {
-        maxFineVariance = variance;
-        finalFineAngle = fineAngle;
-      }
-    }
-    
-    bestAngle = bestAngle + finalFineAngle;
-    
-    return {
-      deskewAngle: bestAngle,
-      taperFactor: bestTaper,
-      shearFactor: bestShear,
-      subCropX: subCrop.x,
-      subCropY: subCrop.y,
-      subCropW: subCrop.w,
-      subCropH: subCrop.h,
-      startMargin: Math.max(1, startMargin),
-      endMargin: Math.min(99, endMargin),
-      confidence: Math.min(100, Math.round((maxFineVariance || 0) / 100))
-    };
-  } catch (err) {
-    console.error("[autoCalibrateImageSkin] failed:", err);
-    return null;
-  }
-};
 
-const compressImageToDataUrl = (imageUrl, maxWidth = 250, quality = 0.6) => {
-  return new Promise((resolve) => {
-    if (!imageUrl) return resolve(null);
-    if (imageUrl.startsWith('data:')) return resolve(imageUrl);
-    
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = `/api/proxy-image?url=${encodeURIComponent(imageUrl)}`;
-    
-    img.onload = () => {
-      try {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        
-        let width = img.naturalWidth;
-        let height = img.naturalHeight;
-        
-        if (width > maxWidth || height > maxWidth) {
-          const ratio = Math.min(maxWidth / width, maxWidth / height);
-          width = Math.round(width * ratio);
-          height = Math.round(height * ratio);
-        }
-        
-        canvas.width = width;
-        canvas.height = height;
-        ctx.drawImage(img, 0, 0, width, height);
-        
-        const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
-        resolve(compressedDataUrl);
-      } catch (e) {
-        console.error('[Compression] failed to read pixels:', e);
-        resolve(imageUrl);
-      }
-    };
-    img.onerror = () => {
-      console.error('[Compression] failed to load image:', imageUrl);
-      resolve(imageUrl);
-    };
-  });
-};
+
+
 
 const distributePinsBySides = (pins, sidesMap, pitch, width, height, pinOffsets = {}) => {
   const leftPins = pins.filter(p => sidesMap[p.name] === 'left');
@@ -914,449 +138,19 @@ export default function SchematicCanvas({
   const [contextMenu, setContextMenu] = useState(null); 
   const [skinPicker, setSkinPicker] = useState(null); // { compId, partNumber, images: [], selectedUrl: '', customUrl: '', loading: false }
   const [visibleCount, setVisibleCount] = useState(12);
+  const [pinoutReference, setPinoutReference] = useState('');
+  const [isSmartPlacing, setIsSmartPlacing] = useState(false);
 
   // States for interactive pin hover and connection info card
   const [hoveredPin, setHoveredPin] = useState(null); // { compId, pinName, compLabel, pin }
   const [tooltipState, setTooltipState] = useState({ visible: false, x: 0, y: 0, compLabel: '', pinName: '', connections: [] });
   const tooltipTimerRef = useRef(null);
 
-  const imageCache = useRef({});
-  const previewCanvasRef = useRef(null);
-  const [prevZoom, setPrevZoom] = useState(1);
-  const [prevPan, setPrevPan] = useState({ x: 0, y: 0 });
-  const [isPrevPanning, setIsPrevPanning] = useState(false);
-  const [prevPanStart, setPrevPanStart] = useState({ x: 0, y: 0 });
-
-  useEffect(() => {
-    if (!skinPicker || !previewCanvasRef.current) return;
-    const canvasEl = previewCanvasRef.current;
-    const ctx = canvasEl.getContext('2d');
-    const imgUrl = skinPicker.customUrl || skinPicker.selectedUrl;
-    
-    const finalPins = distributePinsBySides(
-      skinPicker.rawPins,
-      skinPicker.sidesMap,
-      skinPicker.pitch,
-      skinPicker.width,
-      skinPicker.height,
-      skinPicker.pinOffsets
-    );
-    
-    const drawPreview = (processedImg) => {
-      canvasEl.width = canvasEl.clientWidth || 300;
-      canvasEl.height = canvasEl.clientHeight || 160;
-      ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-      
-      ctx.save();
-      // Apply preview zoom and pan matrix
-      ctx.translate(canvasEl.width / 2 + prevPan.x, canvasEl.height / 2 + prevPan.y);
-      ctx.scale(prevZoom, prevZoom);
-      ctx.translate(-canvasEl.width / 2, -canvasEl.height / 2);
-      
-      const boundsW = skinPicker.width + 40;
-      const boundsH = skinPicker.height + 40;
-      const scale = Math.min(canvasEl.width / boundsW, canvasEl.height / boundsH) * 0.92;
-      
-      const ox = (canvasEl.width - skinPicker.width * scale) / 2;
-      const oy = (canvasEl.height - skinPicker.height * scale) / 2;
-      
-      if (processedImg) {
-        ctx.save();
-        ctx.globalAlpha = skinPicker.opacity;
-        
-        const pcx = ox + (skinPicker.width * scale) / 2;
-        const pcy = oy + (skinPicker.height * scale) / 2;
-        
-        ctx.translate(pcx, pcy);
-        
-        const flipH = skinPicker.flipH || false;
-        const flipV = skinPicker.flipV || false;
-        const rot = skinPicker.rotation || 0;
-        const aspect = skinPicker.aspect || 'stretch';
-        
-        if (flipH) ctx.scale(-1, 1);
-        if (flipV) ctx.scale(1, -1);
-        if (rot !== 0) ctx.rotate((rot * Math.PI) / 180);
-        
-        let drawW = skinPicker.width * scale;
-        let drawH = skinPicker.height * scale;
-        let dx = -drawW / 2;
-        let dy = -drawH / 2;
-        
-        if (aspect === 'fit' || aspect === 'fill') {
-          const imgRatio = processedImg.width / processedImg.height;
-          const compRatio = skinPicker.width / skinPicker.height;
-          
-          if (aspect === 'fit') {
-            if (imgRatio > compRatio) {
-              drawW = skinPicker.width * scale;
-              drawH = (skinPicker.width * scale) / imgRatio;
-            } else {
-              drawH = skinPicker.height * scale;
-              drawW = (skinPicker.height * scale) * imgRatio;
-            }
-          } else { // fill
-            if (imgRatio > compRatio) {
-              drawH = skinPicker.height * scale;
-              drawW = (skinPicker.height * scale) * imgRatio;
-            } else {
-              drawW = skinPicker.width * scale;
-              drawH = (skinPicker.width * scale) / imgRatio;
-            }
-          }
-          dx = -drawW / 2;
-          dy = -drawH / 2;
-        }
-        
-        ctx.drawImage(processedImg, dx, dy, drawW, drawH);
-        ctx.restore();
-      }
-      
-      ctx.strokeStyle = '#4f46e5';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(ox, oy, skinPicker.width * scale, skinPicker.height * scale);
-      
-      finalPins.forEach(pin => {
-        const px = ox + pin.x * scale;
-        const py = oy + pin.y * scale;
-        
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.moveTo(px, py);
-        let tx = px;
-        let ty = py;
-        const pinLen = 6 * scale;
-        if (pin.dir === 'left') tx -= pinLen;
-        else if (pin.dir === 'right') tx += pinLen;
-        else if (pin.dir === 'up') ty -= pinLen;
-        else if (pin.dir === 'down') ty += pinLen;
-        ctx.lineTo(tx, ty);
-        ctx.stroke();
-        
-        ctx.fillStyle = '#ffffff';
-        ctx.strokeStyle = '#334155';
-        ctx.beginPath();
-        ctx.arc(tx, ty, 2 * scale, 0, 2 * Math.PI);
-        ctx.fill();
-        ctx.stroke();
-        
-        ctx.font = `${Math.max(5, Math.round(6 * scale))}px monospace`;
-        ctx.fillStyle = '#0f172a';
-        ctx.textAlign = pin.dir === 'left' ? 'left' : (pin.dir === 'right' ? 'right' : 'center');
-        
-        let labelX = px;
-        let labelY = py + 2.5 * scale;
-        const textMargin = 3 * scale;
-        if (pin.dir === 'left') labelX += textMargin;
-        else if (pin.dir === 'right') labelX -= textMargin;
-        else if (pin.dir === 'up') labelY += textMargin + 2 * scale;
-        else if (pin.dir === 'down') labelY -= textMargin;
-        ctx.fillText(pin.name, labelX, labelY);
-      });
-
-      // Draw Visual Bezel Margin Guidelines
-      const startPct = (skinPicker.startMargin !== undefined ? skinPicker.startMargin : 12) / 100;
-      const endPct = (skinPicker.endMargin !== undefined ? skinPicker.endMargin : 88) / 100;
-      
-      const leftCount = Object.values(skinPicker.sidesMap || {}).filter(s => s === 'left').length;
-      const rightCount = Object.values(skinPicker.sidesMap || {}).filter(s => s === 'right').length;
-      const topCount = Object.values(skinPicker.sidesMap || {}).filter(s => s === 'top').length;
-      const bottomCount = Object.values(skinPicker.sidesMap || {}).filter(s => s === 'bottom').length;
-      
-      ctx.save();
-      ctx.setLineDash([4, 4]);
-      ctx.lineWidth = 1.5;
-      
-      const hasVerticalPins = leftCount > 0 || rightCount > 0;
-      const hasHorizontalPins = topCount > 0 || bottomCount > 0;
-      
-      if (hasVerticalPins) {
-        // Draw horizontal dashed lines at start and end bounds
-        const startY = oy + skinPicker.height * scale * startPct;
-        const endY = oy + skinPicker.height * scale * endPct;
-        
-        ctx.strokeStyle = '#f97316'; // Orange for start boundary
-        ctx.beginPath();
-        ctx.moveTo(ox - 15, startY);
-        ctx.lineTo(ox + skinPicker.width * scale + 15, startY);
-        ctx.stroke();
-        
-        ctx.strokeStyle = '#a855f7'; // Purple for end boundary
-        ctx.beginPath();
-        ctx.moveTo(ox - 15, endY);
-        ctx.lineTo(ox + skinPicker.width * scale + 15, endY);
-        ctx.stroke();
-        
-        // Draw helpful margin text tags
-        ctx.font = `${Math.max(6, Math.round(7 * scale))}px sans-serif`;
-        ctx.fillStyle = '#f97316';
-        ctx.textAlign = 'right';
-        ctx.fillText(`Bezel Start: ${Math.round(startPct * 100)}%`, ox - 20, startY + 3);
-        
-        ctx.fillStyle = '#a855f7';
-        ctx.fillText(`Bezel End: ${Math.round(endPct * 100)}%`, ox - 20, endY + 3);
-      }
-      
-      if (hasHorizontalPins) {
-        // Draw vertical dashed lines
-        const startX = ox + skinPicker.width * scale * startPct;
-        const endX = ox + skinPicker.width * scale * endPct;
-        
-        ctx.strokeStyle = '#f97316';
-        ctx.beginPath();
-        ctx.moveTo(startX, oy - 15);
-        ctx.lineTo(startX, oy + skinPicker.height * scale + 15);
-        ctx.stroke();
-        
-        ctx.strokeStyle = '#a855f7';
-        ctx.beginPath();
-        ctx.moveTo(endX, oy - 15);
-        ctx.lineTo(endX, oy + skinPicker.height * scale + 15);
-        ctx.stroke();
-      }
-      
-      ctx.restore();
-      ctx.restore();
-    };
-    
-    if (imgUrl) {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.src = imgUrl.startsWith('data:') ? imgUrl : `/api/proxy-image?url=${encodeURIComponent(imgUrl)}`;
-      img.onload = () => {
-        const processed = processImageBackground(
-          img,
-          skinPicker.tolerance,
-          skinPicker.doCrop,
-          skinPicker.deskewAngle || 0,
-          {
-            x: skinPicker.subCropX !== undefined ? skinPicker.subCropX : 0,
-            y: skinPicker.subCropY !== undefined ? skinPicker.subCropY : 0,
-            w: skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100,
-            h: skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100
-          },
-          skinPicker.taperFactor || 0,
-          skinPicker.shearFactor || 0
-        );
-        
-        const isUrlChanged = skinPicker.lastLoadedUrl !== imgUrl;
-        const isMarginChanged = skinPicker.startMargin !== skinPicker.lastStartMargin || skinPicker.endMargin !== skinPicker.lastEndMargin;
-        
-        if (isUrlChanged || isMarginChanged) {
-          const cal = isUrlChanged ? autoCalibrateImageSkin(img, skinPicker.tolerance) : null;
-          
-          let activeDeskew = skinPicker.deskewAngle || 0;
-          let activeSubCropX = skinPicker.subCropX !== undefined ? skinPicker.subCropX : 0;
-          let activeSubCropY = skinPicker.subCropY !== undefined ? skinPicker.subCropY : 0;
-          let activeSubCropW = skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100;
-          let activeSubCropH = skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100;
-          let activeStartMargin = skinPicker.startMargin !== undefined ? skinPicker.startMargin : 12;
-          let activeEndMargin = skinPicker.endMargin !== undefined ? skinPicker.endMargin : 88;
-          let activeTaper = skinPicker.taperFactor || 0;
-          let activeShear = skinPicker.shearFactor || 0;
-          
-          if (isUrlChanged && cal) {
-            activeDeskew = cal.deskewAngle;
-            activeSubCropX = cal.subCropX;
-            activeSubCropY = cal.subCropY;
-            activeSubCropW = cal.subCropW;
-            activeSubCropH = cal.subCropH;
-            activeStartMargin = cal.startMargin;
-            activeEndMargin = cal.endMargin;
-            activeTaper = cal.taperFactor;
-            activeShear = cal.shearFactor;
-          }
-          
-          const autoProcessed = processImageBackground(
-            img,
-            skinPicker.tolerance,
-            skinPicker.doCrop,
-            activeDeskew,
-            { x: activeSubCropX, y: activeSubCropY, w: activeSubCropW, h: activeSubCropH },
-            activeTaper,
-            activeShear
-          );
-          
-          const imgRatio = autoProcessed.width / autoProcessed.height;
-          const leftCount = Object.values(skinPicker.sidesMap || {}).filter(s => s === 'left').length;
-          const rightCount = Object.values(skinPicker.sidesMap || {}).filter(s => s === 'right').length;
-          const topCount = Object.values(skinPicker.sidesMap || {}).filter(s => s === 'top').length;
-          const bottomCount = Object.values(skinPicker.sidesMap || {}).filter(s => s === 'bottom').length;
-          
-          let newH = skinPicker.height;
-          let newW = skinPicker.width;
-          
-          if (imgRatio < 1) { // Vertical board
-            newH = Math.max(60, Math.max(leftCount, rightCount) * skinPicker.pitch + 30);
-            newW = Math.max(60, Math.round((newH * imgRatio) / 15) * 15);
-          } else { // Horizontal board
-            newW = Math.max(60, Math.max(topCount, bottomCount) * skinPicker.pitch + 30);
-            newH = Math.max(60, Math.round((newW / imgRatio) / 15) * 15);
-          }
-          
-          // --- AUTOMATIC COMPUTER VISION ALIGNMENT ON LOAD ---
-          const w = autoProcessed.width;
-          const h = autoProcessed.height;
-          const ctxOff = autoProcessed.getContext('2d', { willReadFrequently: true });
-          const imgData = ctxOff.getImageData(0, 0, w, h);
-          
-          const leftPins = skinPicker.rawPins.filter(p => skinPicker.sidesMap[p.name] === 'left');
-          const rightPins = skinPicker.rawPins.filter(p => skinPicker.sidesMap[p.name] === 'right');
-          const topPins = skinPicker.rawPins.filter(p => skinPicker.sidesMap[p.name] === 'top');
-          const bottomPins = skinPicker.rawPins.filter(p => skinPicker.sidesMap[p.name] === 'bottom');
-          
-          const nextOffsets = { ...skinPicker.pinOffsets };
-          const startPctVal = activeStartMargin / 100;
-          const endPctVal = activeEndMargin / 100;
-          
-          const detectPeaks = (sidePins, side, limit) => {
-            if (sidePins.length === 0) return;
-            let startX, endX, startY, endY;
-            const intensities = [];
-            
-            if (side === 'left' || side === 'right') {
-              if (side === 'left') {
-                startX = Math.round(w * 0.01);
-                endX = Math.round(w * 0.12);
-              } else {
-                startX = Math.round(w * 0.88);
-                endX = Math.round(w * 0.99);
-              }
-              const stripW = Math.max(1, endX - startX);
-              for (let y = 0; y < h; y++) {
-                let sum = 0;
-                for (let x = startX; x < endX; x++) {
-                  const idx = (y * w + x) * 4;
-                  sum += 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
-                }
-                intensities.push(sum / stripW);
-              }
-            } else {
-              if (side === 'top') {
-                startY = Math.round(h * 0.04);
-                endY = Math.round(h * 0.16);
-              } else {
-                startY = Math.round(h * 0.84);
-                endY = Math.round(h * 0.96);
-              }
-              const stripH = Math.max(1, endY - startY);
-              for (let x = 0; x < w; x++) {
-                let sum = 0;
-                for (let y = startY; y < endY; y++) {
-                  const idx = (y * w + x) * 4;
-                  sum += 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
-                }
-                intensities.push(sum / stripH);
-              }
-            }
-            
-            const signalLen = intensities.length;
-            const peaks = [];
-            for (let idx = 5; idx < signalLen - 5; idx++) {
-              const val = intensities[idx];
-              let isMax = true;
-              let isMin = true;
-              const windowSize = Math.max(3, Math.round(signalLen / (sidePins.length * 2.5)));
-              for (let di = -windowSize; di <= windowSize; di++) {
-                if (di === 0) continue;
-                if (intensities[idx + di] >= val) isMax = false;
-                if (intensities[idx + di] <= val) isMin = false;
-              }
-              if (isMax || isMin) peaks.push(idx);
-            }
-            
-            let firstPeak = Math.round(signalLen * startPctVal);
-            let lastPeak = Math.round(signalLen * endPctVal);
-            if (peaks.length >= 2) {
-              peaks.sort((a, b) => a - b);
-              firstPeak = peaks[0];
-              lastPeak = peaks[peaks.length - 1];
-            }
-            
-            const scaleToLimit = limit / signalLen;
-            const startVal = firstPeak * scaleToLimit;
-            const endVal = lastPeak * scaleToLimit;
-            
-            // Map the best-fit subset of pins that fall within the physical header range
-            const pinPitch = 15;
-            let startPinIdx = 0;
-            let endPinIdx = sidePins.length - 1;
-            let minStartDiff = Infinity;
-            let minEndDiff = Infinity;
-            
-            sidePins.forEach((p, idx) => {
-              const defaultY = idx * pinPitch + 15;
-              const startDiff = Math.abs(defaultY - startVal);
-              const endDiff = Math.abs(defaultY - endVal);
-              if (startDiff < minStartDiff) {
-                minStartDiff = startDiff;
-                startPinIdx = idx;
-              }
-              if (endDiff < minEndDiff) {
-                minEndDiff = endDiff;
-                endPinIdx = idx;
-              }
-            });
-            
-            const activeCount = endPinIdx - startPinIdx;
-            const span = endVal - startVal;
-            const interval = activeCount > 0 ? (span / activeCount) : 0;
-            
-            sidePins.forEach((p, idx) => {
-              if (idx < startPinIdx) {
-                nextOffsets[p.name] = Math.round(startVal - (startPinIdx - idx) * pinPitch);
-              } else if (idx > endPinIdx) {
-                nextOffsets[p.name] = Math.round(endVal + (idx - endPinIdx) * pinPitch);
-              } else {
-                nextOffsets[p.name] = Math.round(startVal + (idx - startPinIdx) * interval);
-              }
-            });
-          };
-          
-          detectPeaks(leftPins, 'left', newH);
-          detectPeaks(rightPins, 'right', newH);
-          detectPeaks(topPins, 'top', newW);
-          detectPeaks(bottomPins, 'bottom', newW);
-          
-          setSkinPicker(prev => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              width: newW,
-              height: newH,
-              pinOffsets: nextOffsets,
-              deskewAngle: activeDeskew,
-              subCropX: activeSubCropX,
-              subCropY: activeSubCropY,
-              subCropW: activeSubCropW,
-              subCropH: activeSubCropH,
-              startMargin: activeStartMargin,
-              endMargin: activeEndMargin,
-              lastStartMargin: activeStartMargin,
-              lastEndMargin: activeEndMargin,
-              lastLoadedUrl: imgUrl
-            };
-          });
-        }
-        
-        drawPreview(processed);
-      };
-      img.onerror = () => {
-        drawPreview(null);
-        ctx.fillStyle = '#ef4444';
-        ctx.font = '10px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText("Preview failed (CORS/404)", canvasEl.width / 2, canvasEl.height / 2);
-      };
-    } else {
-      drawPreview(null);
-    }
-  }, [skinPicker, prevZoom, prevPan]);
 
   // macOS Slide-out Options Panel settings
   const [wireColor, setWireColor] = useState('#2563eb'); // '#2563eb', '#dc2626', '#16a34a', '#d97706'
   const [autoPenaltyMode, setAutoPenaltyMode] = useState('high'); // 'high', 'low'
+
 
   // Dragging and custom shape/ruler states
   const [draggingCompId, setDraggingCompId] = useState(null);
@@ -1704,340 +498,70 @@ export default function SchematicCanvas({
           ctx.strokeRect(comp.x - 4, comp.y - 4, comp.width + 8, comp.height + 8);
         }
 
-        if (!comp.image) {
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(comp.x, comp.y, comp.width, comp.height);
-        }
+        // Draw the premium CAD board body
+        ctx.save();
+        ctx.fillStyle = '#0f172a'; // Deep slate solder mask
+        ctx.strokeStyle = comp.groupId ? '#3b82f6' : '#1e293b'; 
+        ctx.lineWidth = comp.groupId ? 2.5 : 2;
+        ctx.beginPath();
+        ctx.roundRect(comp.x, comp.y, comp.width, comp.height, 4);
+        ctx.fill();
+        ctx.stroke();
 
-        if (comp.image) {
-          const tolerance = comp.imageTolerance !== undefined ? comp.imageTolerance : 50;
-          const doCrop = comp.imageCrop !== undefined ? comp.imageCrop : true;
-          const deskewAngle = comp.imageDeskew !== undefined ? comp.imageDeskew : 0;
-          const taperFactor = comp.imageTaper !== undefined ? comp.imageTaper : 0;
-          const shearFactor = comp.imageShear !== undefined ? comp.imageShear : 0;
-          const scX = comp.imageSubCropX !== undefined ? comp.imageSubCropX : 0;
-          const scY = comp.imageSubCropY !== undefined ? comp.imageSubCropY : 0;
-          const scW = comp.imageSubCropW !== undefined ? comp.imageSubCropW : 100;
-          const scH = comp.imageSubCropH !== undefined ? comp.imageSubCropH : 100;
+        // Draw a beautiful white silkscreen margin inside the board
+        ctx.strokeStyle = 'rgba(241, 245, 249, 0.15)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(comp.x + 3, comp.y + 3, comp.width - 6, comp.height - 6, 2);
+        ctx.stroke();
+
+        // Draw microchip CAD graphics for MCUs / Custom chips
+        if (comp.type === 'mcu' || comp.pins?.length > 4) {
+          // Top antenna area
+          ctx.fillStyle = '#020617'; // Darker antenna area
+          ctx.fillRect(comp.x + 4, comp.y + 4, comp.width - 8, Math.round(comp.height * 0.12));
           
-          const cacheKey = `raw_${comp.image}`;
-          const processedKey = `processed_${tolerance}_${doCrop}_${deskewAngle}_${taperFactor}_${shearFactor}_${scX}_${scY}_${scW}_${scH}_${comp.image}`;
+          // Antenna copper trace pattern (serpentine line)
+          ctx.strokeStyle = '#d97706'; // Amber/copper color
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          const antY = comp.y + Math.round(comp.height * 0.06);
+          ctx.moveTo(comp.x + 10, antY);
+          ctx.lineTo(comp.x + comp.width - 10, antY);
+          ctx.moveTo(comp.x + 15, antY - 2);
+          ctx.lineTo(comp.x + 15, antY + 2);
+          ctx.moveTo(comp.x + comp.width - 15, antY - 2);
+          ctx.lineTo(comp.x + comp.width - 15, antY + 2);
+          ctx.stroke();
+
+          // Silver metallic chip shield in the center
+          const shieldW = Math.round(comp.width * 0.7);
+          const shieldH = Math.round(comp.height * 0.35);
+          const shieldX = comp.x + Math.round((comp.width - shieldW) / 2);
+          const shieldY = comp.y + Math.round(comp.height * 0.22);
           
-          let cachedImg = imageCache.current[cacheKey];
-          if (!cachedImg) {
-            cachedImg = new Image();
-            cachedImg.crossOrigin = "anonymous";
-            
-            // Bypass CORS issues dynamically using our Node server proxy
-            const srcUrl = comp.image.startsWith('data:') 
-              ? comp.image 
-              : `/api/proxy-image?url=${encodeURIComponent(comp.image)}`;
-            cachedImg.src = srcUrl;
-            
-            cachedImg.onload = () => {
-              console.log(`[Onload Calibration Check] comp: ${comp.id}, imageDeskew: ${comp.imageDeskew}, imageTaper: ${comp.imageTaper}, imageShear: ${comp.imageShear}, imageSubCropW: ${comp.imageSubCropW}`);
-              if (!comp.rawImage && (comp.imageDeskew === undefined || comp.imageTaper === undefined || comp.imageShear === undefined || comp.imageSubCropW === undefined || comp.imageSubCropW === 100)) {
-                console.log(`[Onload Calibration Run] Running autoCalibrateImageSkin for comp: ${comp.id}...`);
-                const cal = autoCalibrateImageSkin(cachedImg, tolerance);
-                console.log(`[Onload Calibration Done] Result:`, cal);
-                if (cal) {
-                  setComponents(prev => prev.map(c => {
-                    if (c.id === comp.id) {
-                      const autoProcessed = processImageBackground(
-                        cachedImg,
-                        tolerance,
-                        doCrop,
-                        cal.deskewAngle,
-                        { x: cal.subCropX, y: cal.subCropY, w: cal.subCropW, h: cal.subCropH },
-                        cal.taperFactor || 0,
-                        cal.shearFactor || 0
-                      );
-                      
-                      const imgRatio = autoProcessed.width / autoProcessed.height;
-                      const pitch = 15;
-                      
-                      const sidesMap = {};
-                      (c.pins || []).forEach(p => {
-                        if (p.dir === 'up') sidesMap[p.name] = 'top';
-                        else if (p.dir === 'down') sidesMap[p.name] = 'bottom';
-                        else if (p.dir === 'right') sidesMap[p.name] = 'right';
-                        else sidesMap[p.name] = 'left';
-                      });
-                      
-                      const leftCount = Object.values(sidesMap).filter(s => s === 'left').length;
-                      const rightCount = Object.values(sidesMap).filter(s => s === 'right').length;
-                      const topCount = Object.values(sidesMap).filter(s => s === 'top').length;
-                      const bottomCount = Object.values(sidesMap).filter(s => s === 'bottom').length;
-                      
-                      let newH = c.height || 300;
-                      let newW = c.width || 120;
-                      if (imgRatio < 1) { // Vertical board
-                        newH = Math.max(60, Math.max(leftCount, rightCount) * pitch + 30);
-                        newW = Math.max(60, Math.round((newH * imgRatio) / 15) * 15);
-                      } else { // Horizontal board
-                        newW = Math.max(60, Math.max(topCount, bottomCount) * pitch + 30);
-                        newH = Math.max(60, Math.round((newW / imgRatio) / 15) * 15);
-                      }
-                      
-                      const leftPins = (c.pins || []).filter(p => sidesMap[p.name] === 'left');
-                      const rightPins = (c.pins || []).filter(p => sidesMap[p.name] === 'right');
-                      const topPins = (c.pins || []).filter(p => sidesMap[p.name] === 'top');
-                      const bottomPins = (c.pins || []).filter(p => sidesMap[p.name] === 'bottom');
-                      
-                      const nextOffsets = {};
-                      const startVal = newH * 0.04;
-                      const endVal = newH * 0.96;
-                      const span = endVal - startVal;
-                      
-                      const leftInterval = span / Math.max(1, leftPins.length - 1);
-                      leftPins.forEach((p, idx) => {
-                        nextOffsets[p.name] = Math.round(startVal + idx * leftInterval);
-                      });
-                      
-                      const rightInterval = span / Math.max(1, rightPins.length - 1);
-                      rightPins.forEach((p, idx) => {
-                        nextOffsets[p.name] = Math.round(startVal + idx * rightInterval);
-                      });
-                      
-                      const topStart = newW * (cal.startMargin / 100);
-                      const topEnd = newW * (cal.endMargin / 100);
-                      const topSpan = topEnd - topStart;
-                      const topInterval = topSpan / Math.max(1, topPins.length - 1);
-                      topPins.forEach((p, idx) => {
-                        nextOffsets[p.name] = Math.round(topStart + idx * topInterval);
-                      });
-                      
-                      const bottomStart = newW * (cal.startMargin / 100);
-                      const bottomEnd = newW * (cal.endMargin / 100);
-                      const bottomSpan = bottomEnd - bottomStart;
-                      const bottomInterval = bottomSpan / Math.max(1, bottomPins.length - 1);
-                      bottomPins.forEach((p, idx) => {
-                        nextOffsets[p.name] = Math.round(bottomStart + idx * bottomInterval);
-                      });
-                      
-                      const finalPins = distributePinsBySides(
-                        c.pins || [],
-                        sidesMap,
-                        pitch,
-                        newW,
-                        newH,
-                        nextOffsets
-                      );
-                      
-                      return {
-                        ...c,
-                        width: newW,
-                        height: newH,
-                        pins: finalPins,
-                        imageDeskew: cal.deskewAngle,
-                        imageTaper: cal.taperFactor,
-                        imageShear: cal.shearFactor,
-                        imageSubCropX: cal.subCropX,
-                        imageSubCropY: cal.subCropY,
-                        imageSubCropW: cal.subCropW,
-                        imageSubCropH: cal.subCropH,
-                        imageTolerance: tolerance,
-                        imageCrop: doCrop,
-                        imageStartMargin: cal.startMargin,
-                        imageEndMargin: cal.endMargin
-                      };
-                    }
-                    return c;
-                  }));
-                }
-              }
-              setPan(p => ({ ...p }));
-            };
-            imageCache.current[cacheKey] = cachedImg;
-          }
-          if (cachedImg.complete && cachedImg.naturalWidth !== 0) {
-            if (!comp.rawImage && (comp.imageDeskew === undefined || comp.imageTaper === undefined || comp.imageShear === undefined) && !cachedImg._calibrating) {
-              cachedImg._calibrating = true;
-              const imgToCal = cachedImg;
-              setTimeout(() => {
-                console.log(`[Cache Complete Calibration] Running autoCalibrateImageSkin for comp: ${comp.id}...`);
-                const cal = autoCalibrateImageSkin(imgToCal, tolerance);
-                console.log(`[Cache Complete Calibration] Result:`, cal);
-                if (cal) {
-                  setComponents(prev => prev.map(c => {
-                    if (c.id === comp.id) {
-                      const autoProcessed = processImageBackground(
-                        imgToCal,
-                        tolerance,
-                        doCrop,
-                        cal.deskewAngle,
-                        { x: cal.subCropX, y: cal.subCropY, w: cal.subCropW, h: cal.subCropH },
-                        cal.taperFactor || 0,
-                        cal.shearFactor || 0
-                      );
-                      
-                      const imgRatio = autoProcessed.width / autoProcessed.height;
-                      const pitch = 15;
-                      
-                      const sidesMap = {};
-                      (c.pins || []).forEach(p => {
-                        if (p.dir === 'up') sidesMap[p.name] = 'top';
-                        else if (p.dir === 'down') sidesMap[p.name] = 'bottom';
-                        else if (p.dir === 'right') sidesMap[p.name] = 'right';
-                        else sidesMap[p.name] = 'left';
-                      });
-                      
-                      const leftCount = Object.values(sidesMap).filter(s => s === 'left').length;
-                      const rightCount = Object.values(sidesMap).filter(s => s === 'right').length;
-                      const topCount = Object.values(sidesMap).filter(s => s === 'top').length;
-                      const bottomCount = Object.values(sidesMap).filter(s => s === 'bottom').length;
-                      
-                      let newH = c.height || 300;
-                      let newW = c.width || 120;
-                      if (imgRatio < 1) { // Vertical board
-                        newH = Math.max(60, Math.max(leftCount, rightCount) * pitch + 30);
-                        newW = Math.max(60, Math.round((newH * imgRatio) / 15) * 15);
-                      } else { // Horizontal board
-                        newW = Math.max(60, Math.max(topCount, bottomCount) * pitch + 30);
-                        newH = Math.max(60, Math.round((newW / imgRatio) / 15) * 15);
-                      }
-                      
-                      const leftPins = (c.pins || []).filter(p => sidesMap[p.name] === 'left');
-                      const rightPins = (c.pins || []).filter(p => sidesMap[p.name] === 'right');
-                      const topPins = (c.pins || []).filter(p => sidesMap[p.name] === 'top');
-                      const bottomPins = (c.pins || []).filter(p => sidesMap[p.name] === 'bottom');
-                      
-                      const nextOffsets = {};
-                      const startVal = newH * 0.04;
-                      const endVal = newH * 0.96;
-                      const span = endVal - startVal;
-                      
-                      const leftInterval = span / Math.max(1, leftPins.length - 1);
-                      leftPins.forEach((p, idx) => {
-                        nextOffsets[p.name] = Math.round(startVal + idx * leftInterval);
-                      });
-                      
-                      const rightInterval = span / Math.max(1, rightPins.length - 1);
-                      rightPins.forEach((p, idx) => {
-                        nextOffsets[p.name] = Math.round(startVal + idx * rightInterval);
-                      });
-                      
-                      const topStart = newW * (cal.startMargin / 100);
-                      const topEnd = newW * (cal.endMargin / 100);
-                      const topSpan = topEnd - topStart;
-                      const topInterval = topSpan / Math.max(1, topPins.length - 1);
-                      topPins.forEach((p, idx) => {
-                        nextOffsets[p.name] = Math.round(topStart + idx * topInterval);
-                      });
-                      
-                      const bottomStart = newW * (cal.startMargin / 100);
-                      const bottomEnd = newW * (cal.endMargin / 100);
-                      const bottomSpan = bottomEnd - bottomStart;
-                      const bottomInterval = bottomSpan / Math.max(1, bottomPins.length - 1);
-                      bottomPins.forEach((p, idx) => {
-                        nextOffsets[p.name] = Math.round(bottomStart + idx * bottomInterval);
-                      });
-                      
-                      const finalPins = distributePinsBySides(
-                        c.pins || [],
-                        sidesMap,
-                        pitch,
-                        newW,
-                        newH,
-                        nextOffsets
-                      );
-                      
-                      return {
-                        ...c,
-                        width: newW,
-                        height: newH,
-                        pins: finalPins,
-                        imageDeskew: cal.deskewAngle,
-                        imageTaper: cal.taperFactor,
-                        imageShear: cal.shearFactor,
-                        imageSubCropX: cal.subCropX,
-                        imageSubCropY: cal.subCropY,
-                        imageSubCropW: cal.subCropW,
-                        imageSubCropH: cal.subCropH,
-                        imageTolerance: tolerance,
-                        imageCrop: doCrop,
-                        imageStartMargin: cal.startMargin,
-                        imageEndMargin: cal.endMargin
-                      };
-                    }
-                    return c;
-                  }));
-                }
-                      }, 50);
-            }
-            
-            let processedCanvas = imageCache.current[processedKey];
-            if (!processedCanvas) {
-              processedCanvas = processImageBackground(cachedImg, tolerance, doCrop, deskewAngle, {
-                x: scX,
-                y: scY,
-                w: scW,
-                h: scH
-              }, comp.imageTaper || 0, comp.imageShear || 0);
-              imageCache.current[processedKey] = processedCanvas;
-            }
-            if (processedCanvas) {
-              ctx.save();
-              // Apply custom opacity (default to 0.3)
-              const op = comp.imageOpacity !== undefined ? comp.imageOpacity : 0.3;
-              ctx.globalAlpha = op;
-              
-              // Center of component
-              const cx = comp.x + comp.width / 2;
-              const cy = comp.y + comp.height / 2;
-              
-              ctx.translate(cx, cy);
-              
-              const flipH = comp.imageFlipH || false;
-              const flipV = comp.imageFlipV || false;
-              const rot = comp.imageRotation || 0;
-              const aspect = comp.imageAspect || 'stretch';
-              
-              if (flipH) ctx.scale(-1, 1);
-              if (flipV) ctx.scale(1, -1);
-              if (rot !== 0) ctx.rotate((rot * Math.PI) / 180);
-              
-              // Respect aspect modes: fit, fill, or stretch
-              let drawW = comp.width;
-              let drawH = comp.height;
-              let dx = -comp.width / 2;
-              let dy = -comp.height / 2;
-              
-              if (aspect === 'fit' || aspect === 'fill') {
-                const imgRatio = processedCanvas.width / processedCanvas.height;
-                const compRatio = comp.width / comp.height;
-                
-                if (aspect === 'fit') {
-                  if (imgRatio > compRatio) {
-                    drawW = comp.width;
-                    drawH = comp.width / imgRatio;
-                  } else {
-                    drawH = comp.height;
-                    drawW = comp.height * imgRatio;
-                  }
-                } else { // fill
-                  if (imgRatio > compRatio) {
-                    drawH = comp.height;
-                    drawW = comp.height * imgRatio;
-                  } else {
-                    drawW = comp.width;
-                    drawH = comp.width / imgRatio;
-                  }
-                }
-                dx = -drawW / 2;
-                dy = -drawH / 2;
-              }
-              
-              ctx.drawImage(processedCanvas, dx, dy, drawW, drawH);
-              ctx.restore();
-            }
-          }
+          ctx.fillStyle = '#1e293b'; // Shield metal fill
+          ctx.strokeStyle = '#475569'; // Shield outline
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.roundRect(shieldX, shieldY, shieldW, shieldH, 3);
+          ctx.fill();
+          ctx.stroke();
+
+          // Chip label/logo
+          ctx.fillStyle = '#94a3b8';
+          ctx.font = 'bold 8px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText("ESPRESSIF", shieldX + shieldW / 2, shieldY + 12);
+          ctx.font = '7px sans-serif';
+          ctx.fillText("ESP32-CORE", shieldX + shieldW / 2, shieldY + 24);
+        } else {
+          // For passive components, draw standard symbol inside
+          ctx.strokeStyle = '#94a3b8';
+          ctx.lineWidth = 1.5;
+          drawComponentSymbol(ctx, comp);
         }
-        if (!comp.image || isSelected) {
-          ctx.strokeStyle = comp.groupId ? '#3b82f6' : '#1e293b'; 
-          ctx.lineWidth = comp.groupId ? 2.5 : 2;
-          ctx.strokeRect(comp.x, comp.y, comp.width, comp.height);
-        }
+        ctx.restore();
 
         if (comp.groupId) {
           ctx.fillStyle = '#3b82f6';
@@ -2061,6 +585,8 @@ export default function SchematicCanvas({
         ctx.fillStyle = '#64748b';
         ctx.fillText(comp.value, comp.x + comp.width / 2, comp.y + comp.height + 12);
 
+        const isCadBoard = comp.type === 'mcu' || comp.pins?.length > 4;
+
         comp.pins.forEach((pin) => {
           const px = comp.x + pin.x;
           const py = comp.y + pin.y;
@@ -2073,7 +599,7 @@ export default function SchematicCanvas({
           let hasPhysicalDot = false;
           let dotX = px;
           let dotY = py;
-          if (comp.image) {
+          if (isCadBoard) {
             const startPctVal = (comp.rawStartMargin !== undefined ? comp.rawStartMargin : 12) / 100;
             const endPctVal = (comp.rawEndMargin !== undefined ? comp.rawEndMargin : 88) / 100;
             const relY = pin.y;
@@ -2100,7 +626,7 @@ export default function SchematicCanvas({
 
           let tx = px;
           let ty = py;
-          const pinLen = comp.image ? 28 : 8;
+          const pinLen = isCadBoard ? 28 : 8;
           if (isLeft) tx -= pinLen;
           else if (isRight) tx += pinLen;
           else if (isUp) ty -= pinLen;
@@ -2114,16 +640,22 @@ export default function SchematicCanvas({
           ctx.lineTo(tx, ty);
           ctx.stroke();
 
-          // Draw the physical pin dot inside the photo ONLY if it falls in the active header range
-          if (comp.image && hasPhysicalDot) {
+          // Draw physical header via ring on CAD board
+          if (isCadBoard && hasPhysicalDot) {
             ctx.save();
-            ctx.fillStyle = '#f59e0b'; // Gold header pin dot
-            ctx.strokeStyle = '#1e293b';
-            ctx.lineWidth = 1;
+            ctx.fillStyle = '#fbbf24'; // Shiny gold via ring
+            ctx.strokeStyle = '#020617';
+            ctx.lineWidth = 1.2;
             ctx.beginPath();
-            ctx.arc(dotX, dotY, 2, 0, 2 * Math.PI);
+            ctx.arc(dotX, dotY, 2.8, 0, 2 * Math.PI);
             ctx.fill();
             ctx.stroke();
+            
+            // Draw dark center hole of via
+            ctx.fillStyle = '#0f172a';
+            ctx.beginPath();
+            ctx.arc(dotX, dotY, 1.2, 0, 2 * Math.PI);
+            ctx.fill();
             ctx.restore();
           }
 
@@ -2136,7 +668,7 @@ export default function SchematicCanvas({
             ctx.lineWidth = 1.2;
             
             let pillX, pillY, pillW, pillH;
-            if (comp.image) {
+            if (isCadBoard) {
               if (isLeft) {
                 pillX = tx - 4;
                 pillY = py - 7;
@@ -2191,7 +723,7 @@ export default function SchematicCanvas({
           
           let labelX = px;
           let labelY = py + 3;
-          if (comp.image) {
+          if (isCadBoard) {
             if (isLeft) labelX = tx + 7;
             else if (isRight) labelX = tx - 7;
             else if (isUp) labelY = ty + 12;
@@ -2928,164 +1460,15 @@ export default function SchematicCanvas({
     });
   };
 
-  const handleCvDetectPins = async () => {
-    if (!skinPicker) return;
-    const imgUrl = skinPicker.customUrl || skinPicker.selectedUrl;
-    if (!imgUrl) return;
-    
-    setSkinPicker(prev => ({ ...prev, loading: true }));
-    
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = imgUrl.startsWith('data:') ? imgUrl : `/api/proxy-image?url=${encodeURIComponent(imgUrl)}`;
-    
-    img.onload = () => {
-      // Process background removal & crop first so we scan the exact cropped chip bounds!
-      const processedCanvas = processImageBackground(
-        img,
-        skinPicker.tolerance,
-        skinPicker.doCrop,
-        skinPicker.deskewAngle || 0,
-        {
-          x: skinPicker.subCropX !== undefined ? skinPicker.subCropX : 0,
-          y: skinPicker.subCropY !== undefined ? skinPicker.subCropY : 0,
-          w: skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100,
-          h: skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100
-        },
-        skinPicker.taperFactor || 0,
-        skinPicker.shearFactor || 0
-      );
-      const w = processedCanvas.width;
-      const h = processedCanvas.height;
-      
-      const ctxOff = processedCanvas.getContext('2d', { willReadFrequently: true });
-      const imgData = ctxOff.getImageData(0, 0, w, h);
-      
-      // Separate pins by sides
-      const leftPins = skinPicker.rawPins.filter(p => skinPicker.sidesMap[p.name] === 'left');
-      const rightPins = skinPicker.rawPins.filter(p => skinPicker.sidesMap[p.name] === 'right');
-      const topPins = skinPicker.rawPins.filter(p => skinPicker.sidesMap[p.name] === 'top');
-      const bottomPins = skinPicker.rawPins.filter(p => skinPicker.sidesMap[p.name] === 'bottom');
-      
-      const nextOffsets = { ...skinPicker.pinOffsets };
-      
-      const detectPeaks = (sidePins, side, limit) => {
-        if (sidePins.length === 0) return;
-        
-        // Scan a strip near the side border
-        let startX, endX, startY, endY;
-        const intensities = [];
-        
-        if (side === 'left' || side === 'right') {
-          if (side === 'left') {
-            startX = Math.round(w * 0.04);
-            endX = Math.round(w * 0.16);
-          } else {
-            startX = Math.round(w * 0.84);
-            endX = Math.round(w * 0.96);
-          }
-          const stripW = Math.max(1, endX - startX);
-          
-          for (let y = 0; y < h; y++) {
-            let sum = 0;
-            for (let x = startX; x < endX; x++) {
-              const idx = (y * w + x) * 4;
-              const lum = 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
-              sum += lum;
-            }
-            intensities.push(sum / stripW);
-          }
-        } else {
-          // top or bottom
-          if (side === 'top') {
-            startY = Math.round(h * 0.04);
-            endY = Math.round(h * 0.16);
-          } else {
-            startY = Math.round(h * 0.84);
-            endY = Math.round(h * 0.96);
-          }
-          const stripH = Math.max(1, endY - startY);
-          
-          for (let x = 0; x < w; x++) {
-            let sum = 0;
-            for (let y = startY; y < endY; y++) {
-              const idx = (y * w + x) * 4;
-              const lum = 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
-              sum += lum;
-            }
-            intensities.push(sum / stripH);
-          }
-        }
-        
-        // Local peak detection filter (finding high-contrast shifts)
-        const signalLen = intensities.length;
-        const peaks = [];
-        
-        for (let idx = 5; idx < signalLen - 5; idx++) {
-          const val = intensities[idx];
-          let isMax = true;
-          let isMin = true;
-          const windowSize = Math.max(3, Math.round(signalLen / (sidePins.length * 2.5)));
-          
-          for (let di = -windowSize; di <= windowSize; di++) {
-            if (di === 0) continue;
-            if (intensities[idx + di] >= val) isMax = false;
-            if (intensities[idx + di] <= val) isMin = false;
-          }
-          if (isMax || isMin) {
-            peaks.push(idx);
-          }
-        }
-        
-        // Bounding box of the peaks (first and last peaks correspond to the outer pins)
-        let firstPeak = Math.round(signalLen * 0.12);
-        let lastPeak = Math.round(signalLen * 0.88);
-        
-        if (peaks.length >= 2) {
-          peaks.sort((a, b) => a - b);
-          firstPeak = peaks[0];
-          lastPeak = peaks[peaks.length - 1];
-        }
-        
-        // Map back from image coordinate domain to component pixel size limit
-        const scaleToLimit = limit / signalLen;
-        const startVal = firstPeak * scaleToLimit;
-        const endVal = lastPeak * scaleToLimit;
-        
-        const span = endVal - startVal;
-        const interval = span / Math.max(1, sidePins.length - 1);
-        
-        sidePins.forEach((p, idx) => {
-          nextOffsets[p.name] = Math.round(startVal + idx * interval);
-        });
-      };
-      
-      detectPeaks(leftPins, 'left', skinPicker.height);
-      detectPeaks(rightPins, 'right', skinPicker.height);
-      detectPeaks(topPins, 'top', skinPicker.width);
-      detectPeaks(bottomPins, 'bottom', skinPicker.width);
-      
-      setSkinPicker(prev => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          pinOffsets: nextOffsets,
-          loading: false
-        };
-      });
-    };
-    
-    img.onerror = () => {
-      console.error('[CV Detect] failed to load image');
-      setSkinPicker(prev => ({ ...prev, loading: false }));
-    };
-  };
+
 
   const handleEditComponentSkin = (compId) => {
     const comp = components.find(c => c.id === compId);
     if (!comp) return;
     
     setContextMenu(null);
+    setPinoutReference(comp.pinoutReference || '');
+    setIsSmartPlacing(false);
     
     const sidesMap = {};
     const pitch = skinPicker?.pitch || 15;
@@ -3133,100 +1516,201 @@ export default function SchematicCanvas({
     });
   };
 
-  const handleSearchComponentSkin = async (compId, searchQueryOverride = null) => {
-    const comp = components.find(c => c.id === compId);
-    if (!comp) return;
+  const applyHeuristicPlacement = () => {
+    if (!skinPicker || !pinoutReference) return;
     
-    setContextMenu(null);
+    const lines = pinoutReference.split('\n').map(l => l.trim().toLowerCase()).filter(Boolean);
+    const pinNames = skinPicker.rawPins.map(p => p.name);
     
-    const query = searchQueryOverride !== null 
-      ? searchQueryOverride 
-      : (comp.label && !comp.label.match(/^C\d+$/i) ? comp.label : (comp.partNumber || comp.name));
+    const nextSides = { ...skinPicker.sidesMap };
+    const nextOffsets = { ...skinPicker.pinOffsets };
     
-    setSkinPicker(prev => {
-      if (!prev) {
-        const sidesMap = {};
-        const pitch = 15;
-        const pinOffsets = {};
-        (comp.pins || []).forEach(p => {
-          if (p.dir === 'up') sidesMap[p.name] = 'top';
-          else if (p.dir === 'down') sidesMap[p.name] = 'bottom';
-          else if (p.dir === 'right') sidesMap[p.name] = 'right';
-          else sidesMap[p.name] = 'left';
+    // Track pin positions in reference text to see ordering
+    const pinIndicesInText = [];
+    pinNames.forEach(pinName => {
+      const pinNameLower = pinName.toLowerCase();
+      // Try to find the line containing this pin name
+      let foundLineIndex = -1;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Match boundary word to avoid matching substrings (e.g. TX matching TX1)
+        const regex = new RegExp('\\b' + pinNameLower.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\b', 'i');
+        if (regex.test(line)) {
+          foundLineIndex = i;
           
-          if (p.dir === 'up' || p.dir === 'down') {
-            pinOffsets[p.name] = p.x;
-          } else {
-            pinOffsets[p.name] = p.y;
+          // Heuristic 1: Explicit side keywords in this line
+          if (line.includes('left') || line.includes('l:')) {
+            nextSides[pinName] = 'left';
+          } else if (line.includes('right') || line.includes('r:')) {
+            nextSides[pinName] = 'right';
+          } else if (line.includes('top') || line.includes('t:')) {
+            nextSides[pinName] = 'top';
+          } else if (line.includes('bottom') || line.includes('b:')) {
+            nextSides[pinName] = 'bottom';
           }
-        });
-        
-        return {
-          compId,
-          partNumber: comp.label || comp.partNumber || comp.name,
-          searchQuery: query,
-          images: [],
-          selectedUrl: comp.rawImage || comp.image || '',
-          customUrl: '',
-          tolerance: comp.rawTolerance !== undefined ? comp.rawTolerance : (comp.imageTolerance !== undefined ? comp.imageTolerance : 20),
-          doCrop: comp.imageCrop !== undefined ? comp.imageCrop : true,
-          width: comp.width || 120,
-          height: comp.height || 300,
-          pitch,
-          sidesMap,
-          rawPins: comp.pins || [],
-          rotation: comp.imageRotation || 0,
-          flipH: comp.imageFlipH || false,
-          flipV: comp.imageFlipV || false,
-          opacity: comp.imageOpacity !== undefined ? comp.imageOpacity : 0.3,
-          aspect: comp.imageAspect || 'stretch',
-          pinOffsets,
-          deskewAngle: comp.rawDeskewAngle !== undefined ? comp.rawDeskewAngle : (comp.imageDeskew || 0),
-          subCropX: comp.rawSubCropX !== undefined ? comp.rawSubCropX : (comp.imageSubCropX || 0),
-          subCropY: comp.rawSubCropY !== undefined ? comp.rawSubCropY : (comp.imageSubCropY || 0),
-          subCropW: comp.rawSubCropW !== undefined ? comp.rawSubCropW : (comp.imageSubCropW || 100),
-          subCropH: comp.rawSubCropH !== undefined ? comp.rawSubCropH : (comp.imageSubCropH || 100),
-          startMargin: comp.rawStartMargin !== undefined ? comp.rawStartMargin : 12,
-          endMargin: comp.rawEndMargin !== undefined ? comp.rawEndMargin : 88,
-          lastStartMargin: comp.rawStartMargin !== undefined ? comp.rawStartMargin : 12,
-          lastEndMargin: comp.rawEndMargin !== undefined ? comp.rawEndMargin : 88,
-          loading: true
-        };
-      }
-      return {
-        ...prev,
-        searchQuery: query,
-        loading: true
-      };
-    });
-    
-    try {
-      const urls = [];
-      const webUrls = await searchComponentImages(query, true);
-      for (const u of webUrls) {
-        if (!urls.includes(u)) urls.push(u);
+          break;
+        }
       }
       
-      setSkinPicker(prev => {
-        if (!prev || prev.compId !== compId) return prev;
-        return {
-          ...prev,
-          images: urls,
-          loading: false,
-          selectedUrl: prev.selectedUrl || urls[0] || ''
-        };
+      if (foundLineIndex !== -1) {
+        pinIndicesInText.push({ pinName, lineIndex: foundLineIndex });
+      }
+    });
+
+    // Heuristic 2: Electrical role conventions (defaults) for pins that haven't been explicitly placed by side keywords
+    pinNames.forEach(pinName => {
+      const pinLower = pinName.toLowerCase();
+      const hasExplicitSide = pinIndicesInText.some(x => x.pinName === pinName && 
+        (lines[x.lineIndex].includes('left') || lines[x.lineIndex].includes('right') || 
+         lines[x.lineIndex].includes('top') || lines[x.lineIndex].includes('bottom')));
+         
+      if (!hasExplicitSide) {
+        if (pinLower.includes('gnd') || pinLower.includes('vss') || pinLower.includes('gnd')) {
+          nextSides[pinName] = 'bottom';
+        } else if (pinLower.includes('3v3') || pinLower.includes('5v') || pinLower.includes('vcc') || pinLower.includes('vdd') || pinLower.includes('vin') || pinLower.includes('power')) {
+          nextSides[pinName] = 'top';
+        }
+      }
+    });
+
+    // Heuristic 3: Sequential / symmetry placement
+    // Sort pins found in text by their order of appearance
+    pinIndicesInText.sort((a, b) => a.lineIndex - b.lineIndex);
+    
+    // Distribute pins that don't have explicit power or side assignments based on sequence
+    const unassignedPins = pinNames.filter(name => {
+      const isPower = name.toLowerCase().match(/(gnd|vss|3v3|5v|vcc|vdd|vin)/i);
+      const hasExplicit = pinIndicesInText.some(x => x.pinName === name && 
+        (lines[x.lineIndex].includes('left') || lines[x.lineIndex].includes('right') || 
+         lines[x.lineIndex].includes('top') || lines[x.lineIndex].includes('bottom')));
+      return !isPower && !hasExplicit;
+    });
+
+    // Place the sequential unassigned pins: half left, half right
+    unassignedPins.forEach((pinName, idx) => {
+      if (idx < unassignedPins.length / 2) {
+        nextSides[pinName] = 'left';
+      } else {
+        nextSides[pinName] = 'right';
+      }
+    });
+
+    // Recalculate offsets on each side to be evenly spaced by the pitch
+    const sides = ['left', 'right', 'top', 'bottom'];
+    sides.forEach(side => {
+      const sidePins = pinNames.filter(p => nextSides[p] === side);
+      // Sort them by original pin index
+      sidePins.sort((a, b) => {
+        const idxA = pinNames.indexOf(a);
+        const idxB = pinNames.indexOf(b);
+        return idxA - idxB;
       });
+      sidePins.forEach((p, index) => {
+        nextOffsets[p] = index * skinPicker.pitch + 15;
+      });
+    });
+
+    // Update state
+    setSkinPicker(prev => {
+      if (!prev) return prev;
+      
+      const nextLeft = Object.values(nextSides).filter(s => s === 'left').length;
+      const nextRight = Object.values(nextSides).filter(s => s === 'right').length;
+      const nextTop = Object.values(nextSides).filter(s => s === 'top').length;
+      const nextBottom = Object.values(nextSides).filter(s => s === 'bottom').length;
+      
+      const nextMinW = Math.max(60, Math.max(nextTop, nextBottom) * prev.pitch + 30);
+      const nextMinH = Math.max(60, Math.max(nextLeft, nextRight) * prev.pitch + 30);
+      
+      return {
+        ...prev,
+        sidesMap: nextSides,
+        pinOffsets: nextOffsets,
+        width: Math.max(prev.width, nextMinW),
+        height: Math.max(prev.height, nextMinH)
+      };
+    });
+  };
+
+  const applyAiPlacement = async () => {
+    if (!skinPicker || !pinoutReference) return;
+    
+    setIsSmartPlacing(true);
+    
+    try {
+      const pinNames = skinPicker.rawPins.map(p => p.name);
+      
+      const promptText = `Pasted Datasheet / Pinout Reference:
+${pinoutReference}
+
+List of Pin Names to map:
+${JSON.stringify(pinNames)}
+
+CAD Dimensions: width ${skinPicker.width}px, height ${skinPicker.height}px, default pitch ${skinPicker.pitch}px.
+
+Your task is to assign each pin to one of the physical sides ('left', 'right', 'top', 'bottom') and assign a clean numeric offset value in pixels (spaced by the pitch e.g., 15, 30, 45...).
+Format output strictly as a JSON object:
+{
+  "mappings": {
+    "PIN_NAME": { "side": "left" | "right" | "top" | "bottom", "offset": number }
+  }
+}`;
+
+      const result = await sendToRouter({
+        prompt: promptText,
+        modelName: 'google/gemini-2.5-flash',
+        boardState: {}
+      });
+
+      const mappings = result?.mappings;
+      if (mappings && typeof mappings === 'object') {
+        const nextSides = { ...skinPicker.sidesMap };
+        const nextOffsets = { ...skinPicker.pinOffsets };
+        
+        Object.keys(mappings).forEach(pinName => {
+          const mapping = mappings[pinName];
+          if (mapping && typeof mapping === 'object' && pinNames.includes(pinName)) {
+            if (['left', 'right', 'top', 'bottom'].includes(mapping.side)) {
+              nextSides[pinName] = mapping.side;
+            }
+            if (typeof mapping.offset === 'number' && mapping.offset >= 0) {
+              nextOffsets[pinName] = mapping.offset;
+            }
+          }
+        });
+
+        setSkinPicker(prev => {
+          if (!prev) return prev;
+          
+          const nextLeft = Object.values(nextSides).filter(s => s === 'left').length;
+          const nextRight = Object.values(nextSides).filter(s => s === 'right').length;
+          const nextTop = Object.values(nextSides).filter(s => s === 'top').length;
+          const nextBottom = Object.values(nextSides).filter(s => s === 'bottom').length;
+          
+          const nextMinW = Math.max(60, Math.max(nextTop, nextBottom) * prev.pitch + 30);
+          const nextMinH = Math.max(60, Math.max(nextLeft, nextRight) * prev.pitch + 30);
+          
+          return {
+            ...prev,
+            sidesMap: nextSides,
+            pinOffsets: nextOffsets,
+            width: Math.max(prev.width, nextMinW),
+            height: Math.max(prev.height, nextMinH)
+          };
+        });
+      } else {
+        alert("AI did not return a valid mappings object. Please check pasted text or try heuristic auto-map.");
+      }
     } catch (e) {
-      console.error("[Search Skin] error:", e);
-      setSkinPicker(prev => {
-        if (!prev || prev.compId !== compId) return prev;
-        return {
-          ...prev,
-          loading: false
-        };
-      });
+      console.error("[AI pinout map error]:", e);
+      alert(`AI Map failed: ${e.message}. Attempting offline heuristic matcher.`);
+      applyHeuristicPlacement();
+    } finally {
+      setIsSmartPlacing(false);
     }
   };
+
+
 
   const handleToggleTraceLockById = (traceId) => {
     setTraces(prev => prev.map(t => 
@@ -3486,33 +1970,12 @@ export default function SchematicCanvas({
               >
                 <Layers size={12} className="mr-1.5 text-indigo-400" /> Split Pins (Left/Right)
               </button>
-              {(() => {
-                const comp = components.find(c => c.id === contextMenu.targetId);
-                const hasImage = !!comp?.image;
-                return hasImage ? (
-                  <>
-                    <button 
-                      onClick={() => handleEditComponentSkin(contextMenu.targetId)}
-                      className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center transition font-medium text-emerald-600 border-b border-slate-100"
-                    >
-                      <Settings size={12} className="mr-1.5 text-emerald-400" /> Edit Skin Parameters
-                    </button>
-                    <button 
-                      onClick={() => handleSearchComponentSkin(contextMenu.targetId)}
-                      className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center transition font-medium text-blue-600"
-                    >
-                      <Search size={12} className="mr-1.5 text-blue-400" /> Replace Photo Skin
-                    </button>
-                  </>
-                ) : (
-                  <button 
-                    onClick={() => handleSearchComponentSkin(contextMenu.targetId)}
-                    className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center transition font-medium text-emerald-600"
-                  >
-                    <Search size={12} className="mr-1.5 text-emerald-400" /> Apply Photo Skin
-                  </button>
-                );
-              })()}
+              <button 
+                onClick={() => handleEditComponentSkin(contextMenu.targetId)}
+                className="w-full px-3 py-1.5 hover:bg-slate-50 flex items-center transition font-medium text-indigo-600 border-b border-slate-100"
+              >
+                <Settings size={12} className="mr-1.5 text-indigo-400" /> Configure CAD & Pinout
+              </button>
               <button 
                 onClick={() => {
                   setComponents(prev => prev.filter(c => c.id !== contextMenu.targetId));
@@ -3613,6 +2076,24 @@ export default function SchematicCanvas({
             };
           });
         };
+
+        const finalPinsForPreview = distributePinsBySides(
+          skinPicker.rawPins,
+          skinPicker.sidesMap,
+          skinPicker.pitch,
+          skinPicker.width,
+          skinPicker.height,
+          skinPicker.pinOffsets
+        );
+
+        // SVG preview variables
+        const compW = skinPicker.width;
+        const compH = skinPicker.height;
+        const scaleK = Math.min(170 / compW, 170 / compH);
+        const bx = (240 - compW * scaleK) / 2;
+        const by = (240 - compH * scaleK) / 2;
+        const bw = compW * scaleK;
+        const bh = compH * scaleK;
         
         return (
           <div 
@@ -3623,8 +2104,8 @@ export default function SchematicCanvas({
               {/* Modal Header */}
               <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
                 <div>
-                  <h3 className="font-bold text-slate-800 text-sm">Select Component Photo Skin</h3>
-                  <p className="text-[10px] text-slate-400 mt-0.5">Part: {skinPicker.partNumber}</p>
+                  <h3 className="font-bold text-slate-800 text-sm">Configure CAD Layout & Pinout</h3>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Component ID: {skinPicker.compId}</p>
                 </div>
                 <button 
                   onClick={() => setSkinPicker(null)}
@@ -3633,658 +2114,306 @@ export default function SchematicCanvas({
                   ✕
                 </button>
               </div>
-
-              {/* Live Search Query Inputs */}
-              <div className="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center space-x-2">
-                <input
-                  type="text"
-                  value={skinPicker.searchQuery || ''}
-                  onChange={(e) => setSkinPicker(prev => ({ ...prev, searchQuery: e.target.value }))}
-                  placeholder="Edit search query (e.g. ESP32-DevKitC-32E)..."
-                  className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white outline-none focus:border-indigo-500"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleSearchComponentSkin(skinPicker.compId, skinPicker.searchQuery);
-                  }}
-                />
-                <button
-                  onClick={() => handleSearchComponentSkin(skinPicker.compId, skinPicker.searchQuery)}
-                  disabled={skinPicker.loading}
-                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-lg text-xs font-semibold transition"
-                >
-                  Search
-                </button>
-              </div>
-
-              {/* Modal Body */}
-              <div className="flex-1 overflow-hidden grid grid-cols-1 md:grid-cols-12 min-h-0">
-                {/* Left Column: Search & Results */}
-                <div className="md:col-span-5 p-5 border-r border-slate-100 flex flex-col space-y-4 overflow-y-auto min-h-0">
-                  {skinPicker.loading ? (
-                    <div className="flex flex-col items-center justify-center py-20 space-y-3">
-                      <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
-                      <span className="text-xs text-slate-500 font-medium">Searching distributor images...</span>
-                    </div>
-                  ) : (
-                    <>
-                      {/* 📋 Visual Candidate Selection Guide */}
-                      <div className="space-y-1.5 border-b border-slate-100 pb-3">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">📋 PCB PHOTO SELECTION GUIDE</span>
-                        <svg viewBox="0 0 420 120" className="w-full bg-slate-50 border border-slate-100 rounded-xl p-1.5">
-                          {/* Good Candidate Card */}
-                          <g transform="translate(5, 5)">
-                            <rect width="195" height="110" rx="8" fill="#f0fdf4" stroke="#bbf7d0" strokeWidth="1" />
-                            <text x="10" y="18" fill="#15803d" fontSize="9" fontWeight="bold" fontFamily="sans-serif">✓ GOOD MATCH (Flat Crop)</text>
-                            
-                            {/* Flat Orthogonal Board */}
-                            <rect x="15" y="28" width="55" height="35" rx="3" fill="#166534" />
-                            <rect x="25" y="38" width="35" height="15" rx="1" fill="#15803d" />
-                            <line x1="15" y1="38" x2="15" y2="52" stroke="#eab308" strokeWidth="2" strokeDasharray="2,2" />
-                            <line x1="70" y1="38" x2="70" y2="52" stroke="#eab308" strokeWidth="2" strokeDasharray="2,2" />
-                            
-                            <text x="80" y="38" fill="#14532d" fontSize="8" fontWeight="bold" fontFamily="sans-serif">Flat Orthogonal</text>
-                            <text x="80" y="50" fill="#166534" fontSize="8" fontFamily="sans-serif">• Solid color backdrops</text>
-                            <text x="80" y="62" fill="#166534" fontSize="8" fontFamily="sans-serif">• Clear header grids</text>
-                            <text x="80" y="74" fill="#166534" fontSize="8" fontFamily="sans-serif">• High edge contrast</text>
-                          </g>
-
-                          {/* Bad Candidate Card */}
-                          <g transform="translate(210, 5)">
-                            <rect width="200" height="110" rx="8" fill="#fef2f2" stroke="#fecaca" strokeWidth="1" />
-                            <text x="10" y="18" fill="#b91c1c" fontSize="9" fontWeight="bold" fontFamily="sans-serif">✗ BAD MATCH (Skew/Noise)</text>
-                            
-                            {/* Perspective / Shadow Board */}
-                            <g transform="translate(15, 30) skewX(-15) scale(1, 0.7)">
-                              <rect x="0" y="0" width="50" height="30" rx="2" fill="#7f1d1d" />
-                            </g>
-                            {/* Curved wire/hand line */}
-                            <path d="M 12,68 C 22,60 32,75 52,58" fill="none" stroke="#dc2626" strokeWidth="1.5" />
-                            
-                            <text x="80" y="38" fill="#7f1d1d" fontSize="8" fontWeight="bold" fontFamily="sans-serif">Perspective Skew</text>
-                            <text x="80" y="50" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Wires, tables, shadows</text>
-                            <text x="80" y="62" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Render axes/ledges</text>
-                            <text x="80" y="74" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Hand/fingers in frame</text>
-                          </g>
-                        </svg>
-                        <p className="text-[9px] text-slate-500 bg-slate-50 border border-slate-200/60 p-2 rounded-lg mt-2 leading-relaxed">
-                          👉 <b>How to pick:</b> Select a photo that is flat, straight, and has a solid clean background. Avoid images with shadows, angles, wires, or programmers.
-                        </p>
-                      </div>
-
-                      {skinPicker.images.length === 0 ? (
-                        <div className="text-center py-6 text-slate-400 text-xs bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                          No search results found for this query.
-                        </div>
-                      ) : (
-                        <div className="space-y-3">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Search Results (Click to Pick & Calibrate):</span>
-                          <div className="grid grid-cols-4 gap-2">
-                            {skinPicker.images.slice(0, visibleCount).map((url, idx) => {
-                              const isSelected = skinPicker.selectedUrl === url;
-                              return (
-                                <button
-                                  key={idx}
-                                  onClick={() => setSkinPicker(prev => ({ ...prev, selectedUrl: url, customUrl: '' }))}
-                                  className={`relative aspect-square bg-slate-50 rounded-xl border-2 overflow-hidden hover:scale-[1.03] active:scale-[0.98] transition-all flex flex-col items-center justify-center p-1 ${
-                                    isSelected ? 'border-indigo-600 shadow-md ring-2 ring-indigo-500/10' : 'border-slate-200 hover:border-slate-300'
-                                  }`}
-                                >
-                                  <img 
-                                    src={url.startsWith('data:') ? url : `/api/proxy-image?url=${encodeURIComponent(url)}`} 
-                                    alt={`Result ${idx}`} 
-                                    className="w-full h-full object-contain"
-                                    onError={(e) => {
-                                      e.target.style.display = 'none';
-                                    }}
-                                    onLoad={(e) => {
-                                      e.target.style.display = 'block';
-                                    }}
-                                  />
-                                  {isSelected && (
-                                    <div className="absolute top-1 right-1 bg-indigo-600 text-white rounded-full w-3.5 h-3.5 flex items-center justify-center text-[8px] font-bold">
-                                      ✓
-                                    </div>
-                                  )}
-                                </button>
-                              );
-                            })}
-                          </div>
-                          
-                          {skinPicker.images.length > visibleCount && (
-                            <button
-                              onClick={() => setVisibleCount(prev => prev + 12)}
-                              className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-semibold tracking-wide transition-all mt-2 active:scale-[0.98]"
-                            >
-                              + Load More Options ({skinPicker.images.length - visibleCount} remaining)
-                            </button>
-                          )}
-                        </div>
-                      )}
-
-                      <div className="space-y-1.5 pt-2 border-t border-slate-100">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Custom Image URL:</label>
+              <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-6 min-h-0">
+                {/* Left Column: Dimensions & SVG Preview */}
+                <div className="flex flex-col space-y-4">
+                  <div className="bg-slate-50/80 rounded-xl p-4 border border-slate-100 space-y-3">
+                    <h4 className="font-semibold text-xs text-slate-700">CAD Body Dimensions</h4>
+                    
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[10px] text-slate-400 font-medium mb-1">Width (px)</label>
                         <input 
-                          type="text"
-                          placeholder="Paste direct URL to a JPEG/PNG photo..."
-                          value={skinPicker.customUrl}
-                          onChange={(e) => setSkinPicker(prev => ({ ...prev, customUrl: e.target.value, selectedUrl: e.target.value ? '' : prev.selectedUrl }))}
-                          className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 focus:bg-white transition"
+                          type="number"
+                          value={skinPicker.width}
+                          min={minW}
+                          onChange={(e) => setSkinPicker(prev => ({ ...prev, width: Math.max(minW, Number(e.target.value)) }))}
+                          className="w-full text-xs px-2 py-1.5 border border-slate-200 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
                         />
                       </div>
-                    </>
-                  )}
+                      
+                      <div>
+                        <label className="block text-[10px] text-slate-400 font-medium mb-1">Height (px)</label>
+                        <input 
+                          type="number"
+                          value={skinPicker.height}
+                          min={minH}
+                          onChange={(e) => setSkinPicker(prev => ({ ...prev, height: Math.max(minH, Number(e.target.value)) }))}
+                          className="w-full text-xs px-2 py-1.5 border border-slate-200 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] text-slate-400 font-medium mb-1">Pitch (px)</label>
+                        <input 
+                          type="number"
+                          value={skinPicker.pitch}
+                          min={5}
+                          max={50}
+                          onChange={(e) => updatePitch(Number(e.target.value))}
+                          className="w-full text-xs px-2 py-1.5 border border-slate-200 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Smart Pin Placement Assistant Box */}
+                  <div className="bg-slate-50/80 rounded-xl p-4 border border-slate-100 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-semibold text-xs text-slate-700 flex items-center gap-1.5">
+                        <Settings size={14} className="text-indigo-500 animate-pulse" />
+                        Smart Pin Placement Assistant
+                      </h4>
+                      {isSmartPlacing && (
+                        <div className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                      )}
+                    </div>
+                    
+                    <p className="text-[10px] text-slate-400 leading-relaxed">
+                      Paste datasheet pin lists, schema text, or copy-paste pinouts below to automatically position layout directions and spacing.
+                    </p>
+                    
+                    <textarea
+                      placeholder="e.g. Pin 1: VCC (power, top)&#10;Pin 2: GND (bottom)&#10;Pin 3: GPIO4 (left)&#10;Pin 4: RXD0 (right)"
+                      value={pinoutReference}
+                      onChange={(e) => setPinoutReference(e.target.value)}
+                      className="w-full text-[10px] p-2 border border-slate-200 rounded-lg bg-white font-mono outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 h-20 resize-none leading-normal"
+                      disabled={isSmartPlacing}
+                    />
+                    
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={applyHeuristicPlacement}
+                        disabled={isSmartPlacing || !pinoutReference.trim()}
+                        className="px-2.5 py-1.5 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:bg-slate-50 disabled:text-slate-300 rounded text-[10px] font-semibold transition flex items-center justify-center gap-1 shadow-sm"
+                        title="Distributes pins sequentially based on keywords/ordering in the text"
+                      >
+                        ⚡ Heuristic Algo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={applyAiPlacement}
+                        disabled={isSmartPlacing || !pinoutReference.trim()}
+                        className="px-2.5 py-1.5 bg-indigo-600 text-white hover:bg-indigo-700 disabled:bg-indigo-300 rounded text-[10px] font-semibold transition flex items-center justify-center gap-1 shadow-sm"
+                        title="Calls Google Gemini / OpenRouter to parse pin mapping using AI"
+                      >
+                        ✨ AI Auto-Map
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* SVG Live Mockup Preview Box */}
+                  <div className="flex-1 border border-slate-200/60 rounded-xl bg-slate-950 flex flex-col items-center justify-center p-4 relative min-h-[280px]">
+                    <div className="absolute top-3 left-3 text-[10px] font-mono text-slate-500 uppercase tracking-wider">
+                      Live CAD Mockup Preview
+                    </div>
+                    
+                    <svg width="240" height="240" viewBox="0 0 240 240" className="drop-shadow-lg">
+                      {/* Component Body */}
+                      <rect 
+                        x={bx} 
+                        y={by} 
+                        width={bw} 
+                        height={bh} 
+                        rx={4} 
+                        fill="#0f172a" 
+                        stroke="#334155" 
+                        strokeWidth={1.5} 
+                      />
+                      {/* Silkscreen margin */}
+                      <rect 
+                        x={bx + 3} 
+                        y={by + 3} 
+                        width={Math.max(0, bw - 6)} 
+                        height={Math.max(0, bh - 6)} 
+                        rx={2} 
+                        fill="none" 
+                        stroke="rgba(241, 245, 249, 0.15)" 
+                        strokeWidth={0.8} 
+                      />
+                      {/* Silver central shield logo */}
+                      <rect 
+                        x={bx + bw * 0.15} 
+                        y={by + bh * 0.22} 
+                        width={bw * 0.7} 
+                        height={bh * 0.35} 
+                        rx={2} 
+                        fill="#1e293b" 
+                        stroke="#475569" 
+                        strokeWidth={1.2} 
+                      />
+                      <text 
+                        x={bx + bw / 2} 
+                        y={by + bh * 0.42} 
+                        fill="#94a3b8" 
+                        fontSize="6px" 
+                        fontWeight="bold"
+                        fontFamily="sans-serif" 
+                        textAnchor="middle"
+                      >
+                        {skinPicker.partNumber || "MCU"}
+                      </text>
+                      
+                      {/* Pins */}
+                      {finalPinsForPreview.map((pin) => {
+                        const px = bx + pin.x * scaleK;
+                        const py = by + pin.y * scaleK;
+                        
+                        let tx = px;
+                        let ty = py;
+                        const pinLen = 8;
+                        if (pin.dir === 'left') tx -= pinLen;
+                        else if (pin.dir === 'right') tx += pinLen;
+                        else if (pin.dir === 'up') ty -= pinLen;
+                        else if (pin.dir === 'down') ty += pinLen;
+                        
+                        return (
+                          <g key={pin.name}>
+                            <line 
+                              x1={px} 
+                              y1={py} 
+                              x2={tx} 
+                              y2={ty} 
+                              stroke="#64748b" 
+                              strokeWidth={1.2} 
+                            />
+                            <circle 
+                              cx={tx} 
+                              cy={ty} 
+                              r={2} 
+                              fill="#ffffff" 
+                              stroke="#475569" 
+                              strokeWidth={0.8} 
+                            />
+                            <text 
+                              x={pin.dir === 'left' ? px + 4 : (pin.dir === 'right' ? px - 4 : px)} 
+                              y={pin.dir === 'up' ? py + 7 : (pin.dir === 'down' ? py - 3 : py + 2)}
+                              fill="#e2e8f0"
+                              fontSize="5px"
+                              fontFamily="monospace"
+                              textAnchor={pin.dir === 'left' ? 'start' : (pin.dir === 'right' ? 'end' : 'middle')}
+                            >
+                              {pin.name}
+                            </text>
+                          </g>
+                        );
+                      })}
+                    </svg>
+                  </div>
                 </div>
 
-                {/* Right Column: Preview & Detailed Controls */}
-                <div className="md:col-span-7 p-5 overflow-y-auto min-h-0 space-y-4">
-                  {(skinPicker.selectedUrl || skinPicker.customUrl) ? (
-                    <div className="space-y-4">
-                      {/* Live Canvas Preview */}
-                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/80 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Live Alignment Preview:</span>
-                          <div className="flex items-center space-x-1.5 bg-white border border-slate-200 rounded px-1.5 py-0.5 shadow-sm">
-                            <button
-                              onClick={() => setPrevZoom(z => Math.max(1, z - 0.25))}
-                              className="text-[10px] font-bold text-slate-500 hover:text-slate-700 px-1"
-                              title="Zoom Out"
-                            >
-                              ➖
-                            </button>
-                            <span className="font-mono text-[9px] text-slate-600 font-semibold w-8 text-center">{prevZoom.toFixed(2)}x</span>
-                            <button
-                              onClick={() => setPrevZoom(z => Math.min(4, z + 0.25))}
-                              className="text-[10px] font-bold text-slate-500 hover:text-slate-700 px-1"
-                              title="Zoom In"
-                            >
-                              ➕
-                            </button>
-                            <button
-                              onClick={() => { setPrevZoom(1); setPrevPan({ x: 0, y: 0 }); }}
-                              className="text-[9px] font-bold text-indigo-500 hover:text-indigo-700 border-l border-slate-200 pl-1.5"
-                              title="Reset Zoom"
-                            >
-                              ↩️ Reset
-                            </button>
-                          </div>
-                        </div>
+                {/* Right Column: Pin List & Alignment Controls */}
+                <div className="flex flex-col min-h-0">
+                  <h4 className="font-semibold text-xs text-slate-700 mb-2">Pin Side & Offset Configuration</h4>
+                  
+                  <div className="flex-1 overflow-y-auto border border-slate-100 rounded-xl bg-slate-50/30 p-3 space-y-2">
+                    {skinPicker.rawPins.map((p) => {
+                      const currentSide = skinPicker.sidesMap[p.name] || 'left';
+                      const defaultIdx = skinPicker.rawPins.findIndex(pin => pin.name === p.name);
+                      const currentOffset = skinPicker.pinOffsets[p.name] !== undefined 
+                        ? skinPicker.pinOffsets[p.name] 
+                        : (defaultIdx * skinPicker.pitch + 15);
+                      
+                      return (
                         <div 
-                          className="w-full h-52 rounded-lg border border-slate-200 overflow-hidden flex items-center justify-center relative bg-white cursor-move select-none"
-                          style={{
-                            backgroundImage: 'conic-gradient(#f1f5f9 0.25turn, #e2e8f0 0.25turn 0.5turn, #f1f5f9 0.5turn 0.75turn, #e2e8f0 0.75turn)',
-                            backgroundSize: '16px 16px'
-                          }}
+                          key={p.name} 
+                          className="flex items-center justify-between p-2.5 bg-white border border-slate-200/60 rounded-lg shadow-sm hover:border-slate-300 transition"
                         >
-                          <canvas
-                            ref={previewCanvasRef}
-                            className="w-full h-full"
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              setIsPrevPanning(true);
-                              setPrevPanStart({ x: e.clientX - prevPan.x, y: e.clientY - prevPan.y });
-                            }}
-                            onMouseMove={(e) => {
-                              if (!isPrevPanning) return;
-                              setPrevPan({ x: e.clientX - prevPanStart.x, y: e.clientY - prevPanStart.y });
-                            }}
-                            onMouseUp={() => setIsPrevPanning(false)}
-                            onMouseLeave={() => setIsPrevPanning(false)}
-                          />
-                        </div>
-                      </div>
+                          <div className="flex items-center space-x-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                            <span className="text-xs font-semibold text-slate-800 font-mono">{p.name}</span>
+                          </div>
 
-                      {/* 🤖 AI Pin Recalibrator Section */}
-                      <div className="p-3 bg-indigo-50/50 border border-indigo-100 rounded-xl space-y-2.5">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider block">🤖 AI Pin Recalibrator</span>
-                          <button
-                            onClick={handleCvDetectPins}
-                            className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-bold transition flex items-center shadow-sm"
-                          >
-                            Recalibrate Pins
-                          </button>
-                        </div>
-                        <p className="text-[10px] text-slate-500 leading-normal">
-                          Runs a pixel-scanning Computer Vision peak-detection filter on the photo to auto-detect metal header pin locations. Adjust bezel bounds if headers have empty offset margins.
-                        </p>
-                        <div className="grid grid-cols-2 gap-3 pt-1">
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>START MARGIN:</span>
-                              <span className="text-indigo-600">{skinPicker.startMargin !== undefined ? skinPicker.startMargin : 12}%</span>
+                          <div className="flex items-center space-x-4">
+                            {/* Side Selector */}
+                            <div className="flex space-x-0.5 bg-slate-100 p-0.5 rounded-md">
+                              {['left', 'right', 'top', 'bottom'].map((side) => {
+                                const active = currentSide === side;
+                                return (
+                                  <button
+                                    key={side}
+                                    type="button"
+                                    onClick={() => updateSidesMap(p.name, side)}
+                                    className={`px-1.5 py-0.5 rounded text-[9px] font-medium uppercase transition ${
+                                      active 
+                                        ? 'bg-indigo-600 text-white shadow-sm' 
+                                        : 'text-slate-500 hover:bg-slate-200'
+                                    }`}
+                                  >
+                                    {side.substring(0, 3)}
+                                  </button>
+                                );
+                              })}
                             </div>
-                            <input 
-                              type="range"
-                              min="0"
-                              max="40"
-                              value={skinPicker.startMargin !== undefined ? skinPicker.startMargin : 12}
-                              onChange={(e) => setSkinPicker(prev => ({ ...prev, startMargin: Number(e.target.value) }))}
-                              className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>END MARGIN:</span>
-                              <span className="text-indigo-600">{skinPicker.endMargin !== undefined ? skinPicker.endMargin : 88}%</span>
+
+                            {/* Offset Nudge Controls */}
+                            <div className="flex items-center space-x-1.5">
+                              <button
+                                type="button"
+                                onClick={() => nudgePinOffset(p.name, -5)}
+                                className="w-5 h-5 rounded border border-slate-200 flex items-center justify-center text-xs hover:bg-slate-50 text-slate-600 font-semibold"
+                              >
+                                -
+                              </button>
+                              <span className="text-[10px] font-mono text-slate-500 w-8 text-center">
+                                {currentOffset}px
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => nudgePinOffset(p.name, 5)}
+                                className="w-5 h-5 rounded border border-slate-200 flex items-center justify-center text-xs hover:bg-slate-50 text-slate-600 font-semibold"
+                              >
+                                +
+                              </button>
                             </div>
-                            <input 
-                              type="range"
-                              min="60"
-                              max="100"
-                              value={skinPicker.endMargin !== undefined ? skinPicker.endMargin : 88}
-                              onChange={(e) => setSkinPicker(prev => ({ ...prev, endMargin: Number(e.target.value) }))}
-                              className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                            />
                           </div>
                         </div>
-                      </div>
-
-                      {/* Tolerance & Crop Controls */}
-                      <div className="grid grid-cols-2 gap-4 border-b border-slate-100 pb-2">
-                        <div className="space-y-1">
-                          <div className="flex justify-between text-[10px] font-bold text-slate-400">
-                            <span>BG REMOVAL TOLERANCE:</span>
-                            <span className="text-indigo-600">{skinPicker.tolerance}</span>
-                          </div>
-                          <input 
-                            type="range"
-                            min="0"
-                            max="120"
-                            value={skinPicker.tolerance}
-                            onChange={(e) => setSkinPicker(prev => ({ ...prev, tolerance: Number(e.target.value) }))}
-                            className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                          />
-                        </div>
-
-                        <div className="flex items-center space-x-2 pt-2">
-                          <input 
-                            type="checkbox"
-                            id="doCropCheckbox"
-                            checked={skinPicker.doCrop}
-                            onChange={(e) => setSkinPicker(prev => ({ ...prev, doCrop: e.target.checked }))}
-                            className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300"
-                          />
-                          <label htmlFor="doCropCheckbox" className="text-xs font-semibold text-slate-600 select-none cursor-pointer">
-                            Auto-Crop Image Bounds
-                          </label>
-                        </div>
-                      </div>
-
-                      {/* Image Aspect Mode & Opacity Controls */}
-                      <div className="grid grid-cols-2 gap-4 border-b border-slate-100 pb-2">
-                        <div className="space-y-1">
-                          <div className="flex justify-between text-[10px] font-bold text-slate-400">
-                            <span>OPACITY:</span>
-                            <span className="text-indigo-600">{Math.round(skinPicker.opacity * 100)}%</span>
-                          </div>
-                          <input 
-                            type="range"
-                            min="5"
-                            max="100"
-                            value={Math.round(skinPicker.opacity * 100)}
-                            onChange={(e) => setSkinPicker(prev => ({ ...prev, opacity: Number(e.target.value) / 100 }))}
-                            className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">IMAGE ASPECT:</span>
-                          <select
-                            value={skinPicker.aspect}
-                            onChange={(e) => setSkinPicker(prev => ({ ...prev, aspect: e.target.value }))}
-                            className="w-full bg-white border border-slate-200 rounded px-1.5 py-0.5 text-xs text-slate-700 outline-none"
-                          >
-                            <option value="fit">Aspect Fit (No Distortion)</option>
-                            <option value="fill">Aspect Fill (Cover Area)</option>
-                            <option value="stretch">Stretch (Fit Boundary)</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      {/* Photo Deskew Controls */}
-                      <div className="space-y-1 border-b border-slate-100 pb-2">
-                        <div className="flex justify-between text-[10px] font-bold text-slate-400">
-                          <span>📐 PHOTO DESKEW (FINE ROTATION):</span>
-                          <span className="text-indigo-600">{(skinPicker.deskewAngle || 0)}°</span>
-                        </div>
-                        <input 
-                          type="range"
-                          min="-45"
-                          max="45"
-                          step="0.5"
-                          value={skinPicker.deskewAngle || 0}
-                          onChange={(e) => setSkinPicker(prev => ({ ...prev, deskewAngle: Number(e.target.value) }))}
-                          className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                        />
-                      </div>
-
-                      {/* 📋 Visual Candidate Selection Guide */}
-                      <div className="space-y-1.5 border-b border-slate-100 pb-3">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">📋 PCB PHOTO SELECTION GUIDE</span>
-                        <svg viewBox="0 0 420 120" className="w-full bg-slate-50 border border-slate-100 rounded-xl p-1.5">
-                          {/* Good Candidate Card */}
-                          <g transform="translate(5, 5)">
-                            <rect width="195" height="110" rx="8" fill="#f0fdf4" stroke="#bbf7d0" strokeWidth="1" />
-                            <text x="10" y="18" fill="#15803d" fontSize="9" fontWeight="bold" fontFamily="sans-serif">✓ GOOD MATCH (Fast Crop)</text>
-                            
-                            {/* Flat Orthogonal Board */}
-                            <rect x="15" y="28" width="55" height="35" rx="3" fill="#166534" />
-                            <rect x="25" y="38" width="35" height="15" rx="1" fill="#15803d" />
-                            <line x1="15" y1="38" x2="15" y2="52" stroke="#eab308" strokeWidth="2" strokeDasharray="2,2" />
-                            <line x1="70" y1="38" x2="70" y2="52" stroke="#eab308" strokeWidth="2" strokeDasharray="2,2" />
-                            
-                            <text x="80" y="38" fill="#14532d" fontSize="8" fontWeight="bold" fontFamily="sans-serif">Flat Orthogonal</text>
-                            <text x="80" y="50" fill="#166534" fontSize="8" fontFamily="sans-serif">• Solid color backdrops</text>
-                            <text x="80" y="62" fill="#166534" fontSize="8" fontFamily="sans-serif">• Clear header grids</text>
-                            <text x="80" y="74" fill="#166534" fontSize="8" fontFamily="sans-serif">• High edge contrast</text>
-                          </g>
-
-                          {/* Bad Candidate Card */}
-                          <g transform="translate(210, 5)">
-                            <rect width="200" height="110" rx="8" fill="#fef2f2" stroke="#fecaca" strokeWidth="1" />
-                            <text x="10" y="18" fill="#b91c1c" fontSize="9" fontWeight="bold" fontFamily="sans-serif">✗ BAD MATCH (Skew/Noise)</text>
-                            
-                            {/* Perspective / Shadow Board */}
-                            <g transform="translate(15, 30) skewX(-15) scale(1, 0.7)">
-                              <rect x="0" y="0" width="50" height="30" rx="2" fill="#7f1d1d" />
-                            </g>
-                            {/* Curved wire/hand line */}
-                            <path d="M 12,68 C 22,60 32,75 52,58" fill="none" stroke="#dc2626" strokeWidth="1.5" />
-                            
-                            <text x="80" y="38" fill="#7f1d1d" fontSize="8" fontWeight="bold" fontFamily="sans-serif">Perspective Skew</text>
-                            <text x="80" y="50" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Wires, tables, shadows</text>
-                            <text x="80" y="62" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Render axes/ledges</text>
-                            <text x="80" y="74" fill="#991b1b" fontSize="8" fontFamily="sans-serif">• Hand/fingers in frame</text>
-                          </g>
-                        </svg>
-                      </div>
-
-                      {/* Image Orientation Controls */}
-                      <div className="grid grid-cols-3 gap-2 border-b border-slate-100 pb-2">
-                        <button
-                          onClick={() => setSkinPicker(prev => ({ ...prev, rotation: ((prev.rotation || 0) + 90) % 360 }))}
-                          className="px-2 py-1 bg-white border border-slate-200 hover:bg-slate-50 rounded text-[10px] font-bold text-slate-600 flex items-center justify-center transition"
-                        >
-                          🔄 Rotate 90°
-                        </button>
-                        <button
-                          onClick={() => setSkinPicker(prev => ({ ...prev, flipH: !prev.flipH }))}
-                          className={`px-2 py-1 border rounded text-[10px] font-bold flex items-center justify-center transition ${
-                            skinPicker.flipH ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                          }`}
-                        >
-                          ↔️ Flip H
-                        </button>
-                        <button
-                          onClick={() => setSkinPicker(prev => ({ ...prev, flipV: !prev.flipV }))}
-                          className={`px-2 py-1 border rounded text-[10px] font-bold flex items-center justify-center transition ${
-                            skinPicker.flipV ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                          }`}
-                        >
-                          ↕️ Flip V
-                        </button>
-                      </div>
-
-                      {/* Component Sizing & Geometry Sliders */}
-                      <div className="space-y-2 border-b border-slate-100 pb-2">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Component Body Geometry:</span>
-                        <div className="grid grid-cols-3 gap-3">
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>WIDTH:</span>
-                              <span className="text-indigo-600">{skinPicker.width}px</span>
-                            </div>
-                            <input 
-                              type="range"
-                              min={minW}
-                              max="300"
-                              step="15"
-                              value={skinPicker.width}
-                              onChange={(e) => setSkinPicker(prev => ({ ...prev, width: Math.max(minW, Number(e.target.value)) }))}
-                              className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                            />
-                          </div>
-
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>HEIGHT:</span>
-                              <span className="text-indigo-600">{skinPicker.height}px</span>
-                            </div>
-                            <input 
-                              type="range"
-                              min={minH}
-                              max="800"
-                              step="15"
-                              value={skinPicker.height}
-                              onChange={(e) => setSkinPicker(prev => ({ ...prev, height: Math.max(minH, Number(e.target.value)) }))}
-                              className="w-full accent-indigo-600 cursor-pointer h-1 bg-slate-200 rounded-lg appearance-none"
-                            />
-                          </div>
-
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                              <span>PIN SPACING:</span>
-                              <span className="text-indigo-600">{skinPicker.pitch}px</span>
-                            </div>
-                            <select
-                              value={skinPicker.pitch}
-                              onChange={(e) => updatePitch(Number(e.target.value))}
-                              className="w-full bg-white border border-slate-200 rounded px-1.5 py-0.5 text-xs text-slate-700 outline-none"
-                            >
-                              <option value="15">15px (Compact)</option>
-                              <option value="30">30px (Double)</option>
-                              <option value="45">45px (Wide)</option>
-                            </select>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Interactive Pin Sides Manager */}
-                      <div className="space-y-1.5">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Align Pin Positions & Manual Offsets:</span>
-                        <div className="max-h-[220px] overflow-y-auto border border-slate-200/80 rounded-lg p-2 space-y-2 bg-white">
-                          {skinPicker.rawPins.map((pin, idx) => {
-                            const currentSide = skinPicker.sidesMap[pin.name] || 'left';
-                            const maxOffset = (currentSide === 'left' || currentSide === 'right') ? skinPicker.height : skinPicker.width;
-                            
-                            let currentVal = skinPicker.pinOffsets[pin.name];
-                            if (currentVal === undefined || currentVal === null) {
-                              const pinIndex = skinPicker.rawPins.findIndex(p => p.name === pin.name);
-                              currentVal = pinIndex * skinPicker.pitch + 15;
-                            }
-                            
-                            return (
-                              <div key={`${pin.name}_${idx}`} className="p-1.5 bg-slate-50/50 rounded border border-slate-100 flex flex-col space-y-1">
-                                <div className="flex items-center justify-between text-xs">
-                                  <span className="font-mono font-bold text-slate-700">{pin.name}</span>
-                                  <div className="flex space-x-1">
-                                    {['left', 'right', 'top', 'bottom'].map(side => (
-                                      <button
-                                        key={side}
-                                        onClick={() => updateSidesMap(pin.name, side)}
-                                        className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase transition ${
-                                          currentSide === side 
-                                            ? 'bg-indigo-600 text-white shadow-sm' 
-                                            : 'bg-white text-slate-400 hover:text-slate-600 border border-slate-200'
-                                        }`}
-                                      >
-                                        {side[0]}
-                                      </button>
-                                    ))}
-                                  </div>
-                                </div>
-                                
-                                {/* Pin Offset Slider */}
-                                <div className="flex items-center space-x-2">
-                                  <input 
-                                    type="range"
-                                    min="0"
-                                    max={maxOffset}
-                                    value={currentVal}
-                                    onChange={(e) => {
-                                      const newVal = Number(e.target.value);
-                                      setSkinPicker(prev => ({
-                                        ...prev,
-                                        pinOffsets: { ...prev.pinOffsets, [pin.name]: newVal }
-                                      }));
-                                    }}
-                                    className="flex-1 accent-slate-600 h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer"
-                                  />
-                                  <div className="flex items-center space-x-1 shrink-0">
-                                    <button 
-                                      onClick={() => nudgePinOffset(pin.name, -1)}
-                                      className="w-4 h-4 bg-white border border-slate-200 rounded flex items-center justify-center text-[10px] font-bold text-slate-600 active:bg-slate-100"
-                                    >
-                                      -
-                                    </button>
-                                    <span className="font-mono text-[9px] text-slate-500 w-8 text-center">{currentVal}px</span>
-                                    <button 
-                                      onClick={() => nudgePinOffset(pin.name, 1)}
-                                      className="w-4 h-4 bg-white border border-slate-200 rounded flex items-center justify-center text-[10px] font-bold text-slate-600 active:bg-slate-100"
-                                    >
-                                      +
-                                    </button>
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center py-20 text-slate-400 text-xs">
-                      Pick a search result or type a custom URL on the left to activate settings.
-                    </div>
-                  )}
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
               {/* Modal Footer */}
-              <div className="px-5 py-3.5 border-t border-slate-100 bg-slate-50/50 flex items-center justify-between">
+              <div className="px-5 py-3.5 border-t border-slate-100 bg-slate-50/50 flex items-center justify-end space-x-2">
+                <button
+                  onClick={() => setSkinPicker(null)}
+                  className="px-4 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-600 font-semibold hover:bg-slate-50 transition"
+                >
+                  Cancel
+                </button>
                 <button
                   onClick={() => {
+                    const finalPins = distributePinsBySides(
+                      skinPicker.rawPins,
+                      skinPicker.sidesMap,
+                      skinPicker.pitch,
+                      skinPicker.width,
+                      skinPicker.height,
+                      skinPicker.pinOffsets
+                    );
+                    
                     setComponents(prev => prev.map(c => 
-                      c.id === skinPicker.compId ? { ...c, image: null } : c
+                      c.id === skinPicker.compId ? { 
+                        ...c, 
+                        width: skinPicker.width,
+                        height: skinPicker.height,
+                        pins: finalPins,
+                        image: null,
+                        rawImage: null,
+                        rawStartMargin: skinPicker.startMargin,
+                        rawEndMargin: skinPicker.endMargin,
+                        pinoutReference: pinoutReference
+                      } : c
                     ));
+                    
                     setSkinPicker(null);
                   }}
-                  className="px-3 py-1.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-semibold hover:bg-rose-100 hover:text-rose-700 transition"
+                  className="px-5 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700 transition"
                 >
-                  Clear Skin
+                  Apply CAD & Pinout
                 </button>
-
-                <div className="flex space-x-2">
-                  <button
-                    onClick={() => setSkinPicker(null)}
-                    className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-500 font-semibold hover:bg-slate-50 transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={async () => {
-                      const finalUrl = skinPicker.customUrl || skinPicker.selectedUrl;
-                      setSkinPicker(prev => ({ ...prev, loading: true }));
-                      
-                      try {
-                        // 1. Load the raw image
-                        const img = new Image();
-                        img.crossOrigin = "anonymous";
-                        img.src = finalUrl.startsWith('data:') ? finalUrl : `/api/proxy-image?url=${encodeURIComponent(finalUrl)}`;
-                        await new Promise((resolve, reject) => {
-                          img.onload = resolve;
-                          img.onerror = reject;
-                        });
-                        
-                        // 2. Generate the final processed canvas at high quality
-                        const processedCanvas = processImageBackground(
-                          img,
-                          skinPicker.tolerance,
-                          skinPicker.doCrop,
-                          skinPicker.deskewAngle || 0,
-                          {
-                            x: skinPicker.subCropX !== undefined ? skinPicker.subCropX : 0,
-                            y: skinPicker.subCropY !== undefined ? skinPicker.subCropY : 0,
-                            w: skinPicker.subCropW !== undefined ? skinPicker.subCropW : 100,
-                            h: skinPicker.subCropH !== undefined ? skinPicker.subCropH : 100
-                          },
-                          skinPicker.taperFactor || 0,
-                          skinPicker.shearFactor || 0
-                        );
-                        
-                        // 3. Downscale transparent PNG to max 500px to maintain crisp resolution with zero background noise
-                        let processedDataUrl = null;
-                        if (processedCanvas) {
-                          const maxDim = 500;
-                          const scale = Math.min(1, maxDim / Math.max(processedCanvas.width, processedCanvas.height));
-                          if (scale < 1) {
-                            const scaleCanvas = document.createElement('canvas');
-                            scaleCanvas.width = Math.round(processedCanvas.width * scale);
-                            scaleCanvas.height = Math.round(processedCanvas.height * scale);
-                            const scaleCtx = scaleCanvas.getContext('2d');
-                            scaleCtx.drawImage(processedCanvas, 0, 0, scaleCanvas.width, scaleCanvas.height);
-                            processedDataUrl = scaleCanvas.toDataURL('image/png');
-                          } else {
-                            processedDataUrl = processedCanvas.toDataURL('image/png');
-                          }
-                        }
-                        
-                        const finalPins = distributePinsBySides(
-                          skinPicker.rawPins,
-                          skinPicker.sidesMap,
-                          skinPicker.pitch,
-                          skinPicker.width,
-                          skinPicker.height,
-                          skinPicker.pinOffsets
-                        );
-                        
-                        setComponents(prev => prev.map(c => 
-                          c.id === skinPicker.compId ? { 
-                            ...c, 
-                            width: skinPicker.width,
-                            height: skinPicker.height,
-                            pins: finalPins,
-                            
-                            // Save processed transparent PNG as active image
-                            image: processedDataUrl || finalUrl,
-                            
-                            // Store original raw settings for editing
-                            rawImage: finalUrl,
-                            rawTolerance: skinPicker.tolerance,
-                            rawStartMargin: skinPicker.startMargin,
-                            rawEndMargin: skinPicker.endMargin,
-                            rawDeskewAngle: skinPicker.deskewAngle,
-                            rawSubCropX: skinPicker.subCropX,
-                            rawSubCropY: skinPicker.subCropY,
-                            rawSubCropW: skinPicker.subCropW,
-                            rawSubCropH: skinPicker.subCropH,
-                            
-                            // Reset dynamic drawing transformations so they are not double-applied on schematic
-                            imageTolerance: 0,
-                            imageCrop: false,
-                            imageRotation: skinPicker.rotation || 0,
-                            imageFlipH: skinPicker.flipH || false,
-                            imageFlipV: skinPicker.flipV || false,
-                            imageOpacity: skinPicker.opacity,
-                            imageAspect: skinPicker.aspect,
-                            imageDeskew: 0,
-                            imageSubCropX: 0,
-                            imageSubCropY: 0,
-                            imageSubCropW: 100,
-                            imageSubCropH: 100
-                          } : c
-                        ));
-                      } catch (err) {
-                        console.error('[Skin Apply] compression/alignment failed:', err);
-                      }
-                      
-                      setSkinPicker(null);
-                    }}
-                    disabled={skinPicker.loading}
-                    className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700 disabled:bg-indigo-400 transition"
-                  >
-                    Apply Skin
-                  </button>
-                </div>
               </div>
             </div>
           </div>

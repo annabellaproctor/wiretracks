@@ -104,23 +104,63 @@ Available JSON Action Schemas (You can combine MULTIPLE actions in the list to e
   }
 }
 
-9. Web Search (query online datasheets, component libraries, or electrical specifications):
+9. Web Search (general text lookup fallback):
 {
   "type": "WEB_SEARCH",
   "payload": {
-    "query": "LM7805 dropout voltage footprint"
+    "query": "LM7805 dropout voltage datasheet"
   }
 }
 
-10. Search Similar Components (look for pin-compatible alternatives or cheaper options in database):
+10. Search EasyEDA Symbol Index (find CAD schematic symbols on EasyEDA):
 {
-  "type": "SEARCH_SIMILAR_COMPONENTS",
+  "type": "SEARCH_EASYEDA",
   "payload": {
-    "query": "ESP32-WROOM-32E alternatives"
+    "query": "ESP32-WROOM-32E"
   }
 }
 
-11. Import Component specifications to local database:
+11. Search LCSC Catalog (find parts on LCSC):
+{
+  "type": "SEARCH_LCSC",
+  "payload": {
+    "query": "C25112"
+  }
+}
+
+12. Search DigiKey API (query official DigiKey specifications and stock):
+{
+  "type": "SEARCH_DIGIKEY",
+  "payload": {
+    "query": "STM32F103C8T6"
+  }
+}
+
+13. Search Mouser Catalog API (query Mouser parts database):
+{
+  "type": "SEARCH_MOUSER",
+  "payload": {
+    "query": "RP2040"
+  }
+}
+
+14. Search Amazon Products (search consumer parts on Amazon):
+{
+  "type": "SEARCH_AMAZON",
+  "payload": {
+    "query": "ESP32 DevKit v1"
+  }
+}
+
+15. Search Google Shopping (GCP Merchant lookup):
+{
+  "type": "SEARCH_GOOGLE_SHOPPING",
+  "payload": {
+    "query": "LED Red 0805"
+  }
+}
+
+16. Import Component specifications to local database:
 {
   "type": "IMPORT_TO_LIBRARY",
   "payload": {
@@ -131,13 +171,11 @@ Available JSON Action Schemas (You can combine MULTIPLE actions in the list to e
     "height": 60,
     "pins": [
       { "name": "GND", "x": 0, "y": 15, "dir": "left" },
-      { "name": "TRIG", "x": 0, "y": 30, "dir": "left" },
-      { "name": "OUT", "x": 0, "y": 45, "dir": "left" },
-      { "name": "RESET", "x": 0, "y": 60, "dir": "left" },
-      { "name": "VCC", "x": 90, "y": 15, "dir": "right" },
-      { "name": "DISCH", "x": 90, "y": 30, "dir": "right" },
-      { "name": "THRES", "x": 90, "y": 45, "dir": "right" },
-      { "name": "CONT", "x": 90, "y": 60, "dir": "right" }
+      { "name": "TRIG", "x": 0, "y": 30, "dir": "left" }
+    ],
+    "customShapes": [
+      { "type": "rect", "x": 5, "y": 5, "w": 80, "h": 50, "fill": "#1e293b", "stroke": "#475569" },
+      { "type": "text", "text": "TIMER", "x": 45, "y": 30, "fill": "#ffffff" }
     ],
     "manufacturer": "Texas Instruments",
     "partNumber": "NE555DR",
@@ -146,7 +184,7 @@ Available JSON Action Schemas (You can combine MULTIPLE actions in the list to e
   }
 }
 
-12. Update Component Spec (Super macro to modify pin names, footprints, width, height, or outlines of existing library parts):
+17. Update Component Spec (Super macro to modify pin names, footprints, width, height, custom shapes, or outlines of existing library parts):
 - Complete replacement:
 {
   "type": "UPDATE_COMPONENT_SPEC",
@@ -157,8 +195,10 @@ Available JSON Action Schemas (You can combine MULTIPLE actions in the list to e
       "height": 200,
       "pins": [
         { "name": "3V3", "x": 0, "y": 15, "dir": "left" },
-        { "name": "GND", "x": 0, "y": 30, "dir": "left" },
-        { "name": "GPIO1", "x": 120, "y": 15, "dir": "right" }
+        { "name": "GND", "x": 0, "y": 30, "dir": "left" }
+      ],
+      "customShapes": [
+        { "type": "rect", "x": 10, "y": 10, "w": 100, "h": 180, "fill": "#020617", "stroke": "#334155" }
       ]
     }
   }

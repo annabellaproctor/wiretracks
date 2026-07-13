@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Cpu, RotateCw, Trash2, Edit2, Link } from 'lucide-react';
 import { deduplicateComponents, auditDatabaseWithAI } from '../utils/componentMerger';
+import { autoHeuristicPinoutMap } from '../utils/pinoutHeuristic';
 
 function SchematicPreview({ type }) {
   if (type === 'resistor') {
@@ -270,7 +271,8 @@ export default function SidebarLibrary({
       datasheet: '#'
     };
 
-    setComponents(prev => [...prev, newComp]);
+    const mappedComp = autoHeuristicPinoutMap(newComp);
+    setComponents(prev => [...prev, mappedComp]);
     setSelectedComponentId(newId);
   };
 

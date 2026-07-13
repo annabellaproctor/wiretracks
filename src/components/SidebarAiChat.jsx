@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { sendToRouter } from '../utils/openRouter';
 import { Sparkles, Send, RefreshCw, Key, Settings, Image, Check, AlertTriangle, Search, BookOpen } from 'lucide-react';
 import { searchPartsUnified, searchTextWeb } from '../utils/partsApi';
+import { autoHeuristicPinoutMap } from '../utils/pinoutHeuristic';
 
 export function SparkyIcon({ size = 14, className = "" }) {
   return (
@@ -33,11 +34,7 @@ export default function SidebarAiChat({
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [apiKey, setApiKey] = useState(() => {
-    const envKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-    if (envKey) return envKey;
-    return localStorage.getItem('wiretracks_openrouter_key') || '';
-  });
+  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY || '';
 
   const [includeScreenshot, setIncludeScreenshot] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -99,7 +96,6 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
   };
 
   const handleSaveSettings = () => {
-    localStorage.setItem('wiretracks_openrouter_key', apiKey);
     localStorage.setItem('wiretracks_solver_model', selectedModel);
     setShowSettings(false);
   };
@@ -263,7 +259,8 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
         const comp = act.payload;
         setComponents(prev => {
           if (prev.some(c => c.id === comp.id)) return prev;
-          return [...prev, comp];
+          const mappedComp = autoHeuristicPinoutMap(comp);
+          return [...prev, mappedComp];
         });
       }
       
@@ -516,16 +513,12 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
               <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">API Key</label>
               {import.meta.env.VITE_OPENROUTER_API_KEY ? (
                 <div className="w-full px-2.5 py-1.5 border border-emerald-250 bg-emerald-50/50 rounded-lg text-[10px] text-emerald-800 font-semibold select-none flex items-center">
-                  <Check size={12} className="mr-1 text-emerald-600" /> Active (.env.local key loaded)
+                  <Check size={12} className="mr-1 text-emerald-600" /> Active (.env key loaded)
                 </div>
               ) : (
-                <input
-                  type="password"
-                  placeholder="sk-or-v1-..."
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-none focus:border-amber-500 bg-slate-50 focus:bg-white transition"
-                />
+                <div className="w-full px-2.5 py-1.5 border border-rose-200 bg-rose-50/50 rounded-lg text-[10px] text-rose-800 font-semibold select-none">
+                  ⚠️ Configure VITE_OPENROUTER_API_KEY in .env
+                </div>
               )}
             </div>
 

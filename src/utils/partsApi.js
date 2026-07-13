@@ -445,50 +445,7 @@ export async function searchPartsUnified(query, provider = 'all') {
   return finalResults;
 }
 
-// AI Component Search Results Ranker
-export async function rankSearchResultsWithAI(query, results, geminiKey) {
-  if (!geminiKey || results.length === 0) return results;
 
-  const prompt = `You are a professional electronic component selector and design expert. 
-Review the following list of component search results for user query "${query}". 
-Sort and rank the best 8 component candidates, clean up any messy descriptions, highlight stock options, and return a valid JSON array matching the exact structure of the input components list.
-Do not wrap your output in markdown JSON blocks. Do not add conversational text.
-
-Input Search Results:
-${JSON.stringify(results, null, 2)}`;
-
-  try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: "application/json" }
-      })
-    });
-
-    if (!response.ok) {
-      console.warn("AI Ranker HTTP error:", response.status);
-      return results;
-    }
-
-    const data = await response.json();
-    const textOut = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!textOut) return results;
-
-    let cleanJson = textOut.trim();
-    if (cleanJson.startsWith('```json')) {
-      cleanJson = cleanJson.replace(/^```json/, '').replace(/```$/, '').trim();
-    } else if (cleanJson.startsWith('```')) {
-      cleanJson = cleanJson.replace(/^```/, '').replace(/```$/, '').trim();
-    }
-
-    return JSON.parse(cleanJson);
-  } catch (e) {
-    console.error("AI ranking failed, returning raw results:", e);
-    return results;
-  }
-}
 
 export async function searchTextWeb(query) {
   const tavilyKey = import.meta.env.VITE_TAVILY_API_KEY;
