@@ -7,6 +7,12 @@ export function autoHeuristicPinoutMap(component) {
     return component;
   }
 
+  // If the pins already have non-zero coordinates or defined layouts, preserve them!
+  const hasCoordinates = component.pins.some(p => (p.x !== undefined && p.x !== 0) || (p.y !== undefined && p.y !== 0));
+  if (hasCoordinates) {
+    return component;
+  }
+
   const pinNames = component.pins.map(p => p.name);
   
   const sidesMap = {};

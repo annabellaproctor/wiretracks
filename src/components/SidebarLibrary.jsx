@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Cpu, RotateCw, Trash2, Edit2, Link } from 'lucide-react';
 import { deduplicateComponents, auditDatabaseWithAI } from '../utils/componentMerger';
 import { autoHeuristicPinoutMap } from '../utils/pinoutHeuristic';
+import { sqliteDb } from '../utils/sqliteDb';
 
 function SchematicPreview({ type }) {
   if (type === 'resistor') {
@@ -188,69 +189,15 @@ export default function SidebarLibrary({
   };
 
   // Pre-configured components for library
-  const libItems = [
-    {
-      type: 'mcu',
-      label: 'ESP32 Module',
-      value: 'ESP32-DevKit',
-      width: 105,
-      height: 120,
-      pins: [
-        { name: '5V', x: 0, y: 15, dir: 'left' },
-        { name: '3V3', x: 0, y: 30, dir: 'left' },
-        { name: 'GND', x: 0, y: 105, dir: 'left' },
-        { name: 'IO2', x: 105, y: 45, dir: 'right' },
-        { name: 'IO4', x: 105, y: 60, dir: 'right' },
-        { name: 'RX2', x: 105, y: 90, dir: 'right' },
-        { name: 'TX2', x: 105, y: 105, dir: 'right' }
-      ]
-    },
-    {
-      type: 'regulator',
-      label: 'Linear Regulator',
-      value: 'LM7805 (5V)',
-      width: 90,
-      height: 60,
-      pins: [
-        { name: 'IN', x: 0, y: 15, dir: 'left' },
-        { name: 'GND', x: 45, y: 60, dir: 'down' },
-        { name: 'OUT', x: 90, y: 15, dir: 'right' }
-      ]
-    },
-    {
-      type: 'resistor',
-      label: 'Resistor',
-      value: '10kΩ',
-      width: 60,
-      height: 30,
-      pins: [
-        { name: '1', x: 0, y: 15, dir: 'left' },
-        { name: '2', x: 60, y: 15, dir: 'right' }
-      ]
-    },
-    {
-      type: 'capacitor',
-      label: 'Capacitor',
-      value: '100nF',
-      width: 30,
-      height: 45,
-      pins: [
-        { name: '1', x: 15, y: 0, dir: 'up' },
-        { name: '2', x: 15, y: 45, dir: 'down' }
-      ]
-    },
-    {
-      type: 'led',
-      label: 'GaAs LED',
-      value: 'Red LED',
-      width: 45,
-      height: 60,
-      pins: [
-        { name: 'A', x: 0, y: 30, dir: 'left' },
-        { name: 'K', x: 45, y: 30, dir: 'right' }
-      ]
-    }
-  ];
+  const [libraryItems, setLibraryItems] = useState(() => sqliteDb.tables.library);
+
+  useEffect(() => {
+    const handleUpdate = () => {
+      setLibraryItems([...sqliteDb.tables.library]);
+    };
+    window.addEventListener('wiretracks_sqlite_db_update', handleUpdate);
+    return () => window.removeEventListener('wiretracks_sqlite_db_update', handleUpdate);
+  }, []);
 
   // Placer
   const handlePlaceComponent = (item) => {
@@ -266,9 +213,11 @@ export default function SidebarLibrary({
       width: item.width,
       height: item.height,
       pins: item.pins,
-      partNumber: 'N/A',
-      cost: '$0.05',
-      datasheet: '#'
+      customShapes: item.customShapes || [],
+      partNumber: item.partNumber || 'N/A',
+      cost: item.cost || '$0.05',
+      datasheet: item.datasheet || '#',
+      libraryId: item.id
     };
 
     const mappedComp = autoHeuristicPinoutMap(newComp);
@@ -392,7 +341,7 @@ export default function SidebarLibrary({
                 </button>
               </div>
               <div className="space-y-2">
-                {libItems.map((item, idx) => (
+                {libraryItems.map((item, idx) => (
                   <button
                     key={idx}
                     onClick={() => handlePlaceComponent(item)}

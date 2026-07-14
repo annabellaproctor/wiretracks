@@ -4,9 +4,9 @@ import BreadboardCanvas from './components/BreadboardCanvas';
 import PcbCanvas from './components/PcbCanvas';
 import SidebarLibrary from './components/SidebarLibrary';
 import SidebarAiChat, { SparkyIcon } from './components/SidebarAiChat';
-import SidebarPartsSearch from './components/SidebarPartsSearch';
 import SidebarJlcpcb from './components/SidebarJlcpcb';
-import { Cpu, Layers, GitFork, Download, Sparkles, Sliders, Search, ExternalLink, RefreshCw, X, ArrowLeft, ArrowRight, Eye, EyeOff, Ruler, ShoppingCart } from 'lucide-react';
+import { Cpu, Layers, GitFork, Download, Sparkles, Sliders, ExternalLink, RefreshCw, X, ArrowLeft, ArrowRight, Eye, EyeOff, Ruler, ShoppingCart } from 'lucide-react';
+import { sqliteDb } from './utils/sqliteDb';
 
 const INITIAL_COMPONENTS = [
   {
@@ -232,14 +232,14 @@ const INITIAL_TRACES = [
 
 export default function App() {
   const [activeView, setActiveView] = useState('schematic'); 
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('wiretracks_solver_model') || 'google/gemini-2.5-flash'); 
+  const [selectedModel, setSelectedModel] = useState(() => sqliteDb.getSetting('wiretracks_solver_model') || 'google/gemini-2.5-flash'); 
   
   // VSCode-style Windowization properties
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [activeSidebarTab, setActiveSidebarTab] = useState('ai'); // 'ai', 'library', 'search'
+  const [activeSidebarTab, setActiveSidebarTab] = useState('ai'); // 'ai', 'library', 'jlcpcb'
   
   const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const cached = localStorage.getItem('wiretracks_sidebar_width');
+    const cached = sqliteDb.getSetting('wiretracks_sidebar_width');
     return cached ? parseInt(cached, 10) : 320;
   });
   const [isResizing, setIsResizing] = useState(false);
@@ -292,7 +292,7 @@ export default function App() {
       const newWidth = window.innerWidth - e.clientX - 48; // offset VSCode Activity bar
       const constrained = Math.max(220, Math.min(600, newWidth));
       setSidebarWidth(constrained);
-      localStorage.setItem('wiretracks_sidebar_width', constrained.toString());
+      sqliteDb.setSetting('wiretracks_sidebar_width', constrained.toString());
     };
     const stopResize = () => {
       setIsResizing(false);
@@ -305,32 +305,69 @@ export default function App() {
     };
   }, [isResizing]);
 
-  // Load state from local storage
-  useEffect(() => {
-    const cached = localStorage.getItem('wiretracks_session_data');
-    if (cached) {
-      try {
-        const parsed = JSON.parse(cached);
-        setComponents(parsed.components || []);
-        setTraces(parsed.traces || []);
-        setCustomPcbPads(parsed.customPcbPads || []);
-        setCustomPcbTraces(parsed.customPcbTraces || []);
-        setCustomTexts(parsed.customTexts || []);
-        setCustomShapes(parsed.customShapes || []);
-        if (parsed.gridSize) setGridSize(parsed.gridSize);
-      } catch (e) {
-        console.error("Failed to parse cached session data:", e);
-        loadDefaultPreset();
+  // Helper to live sync components from library presets
+  const syncComponentsWithLibrary = (comps) => {
+    return comps.map(comp => {
+      // Find matching preset ONLY by libraryId or exact value (never match generic labels like 'Resistor')
+      const preset = sqliteDb.tables.library.find(libItem => 
+        (comp.libraryId && libItem.id === comp.libraryId) ||
+        (!comp.libraryId && libItem.value && comp.value && libItem.value.toLowerCase() === comp.value.toLowerCase())
+      );
+      if (preset) {
+        return {
+          ...comp,
+          libraryId: preset.id,
+          width: preset.width,
+          height: preset.height,
+          pins: preset.pins,
+          customShapes: preset.customShapes || [],
+          manufacturer: preset.manufacturer || comp.manufacturer,
+          partNumber: preset.partNumber || comp.partNumber,
+          cost: preset.cost || comp.cost,
+          datasheet: preset.datasheet || comp.datasheet
+        };
       }
+      return comp;
+    });
+  };
+
+  // Load state from SQLite database
+  useEffect(() => {
+    const parsed = sqliteDb.getSession();
+    if (parsed) {
+      let loadedComps = parsed.components || [];
+      loadedComps = syncComponentsWithLibrary(loadedComps);
+      setComponents(loadedComps);
+      setTraces(parsed.traces || []);
+      setCustomPcbPads(parsed.customPcbPads || []);
+      setCustomPcbTraces(parsed.customPcbTraces || []);
+      setCustomTexts(parsed.customTexts || []);
+      setCustomShapes(parsed.customShapes || []);
+      if (parsed.gridSize) setGridSize(parsed.gridSize);
     } else {
       loadDefaultPreset();
     }
   }, []);
 
-  // Save changes to local storage
+  // Listen for database changes to dynamically sync all placed components live
+  useEffect(() => {
+    const handleDbUpdate = () => {
+      setComponents(prev => {
+        const synced = syncComponentsWithLibrary(prev);
+        if (JSON.stringify(synced) !== JSON.stringify(prev)) {
+          return synced;
+        }
+        return prev;
+      });
+    };
+    window.addEventListener('wiretracks_sqlite_db_update', handleDbUpdate);
+    return () => window.removeEventListener('wiretracks_sqlite_db_update', handleDbUpdate);
+  }, []);
+
+  // Save changes to SQLite database
   useEffect(() => {
     if (components.length === 0 && customPcbPads.length === 0) return;
-    const sessionData = {
+    sqliteDb.setSession({
       components,
       traces,
       customPcbPads,
@@ -338,8 +375,7 @@ export default function App() {
       customTexts,
       customShapes,
       gridSize
-    };
-    localStorage.setItem('wiretracks_session_data', JSON.stringify(sessionData));
+    });
   }, [components, traces, customPcbPads, customPcbTraces, customTexts, customShapes, gridSize]);
 
   // Center camera target step during tour navigation
@@ -375,7 +411,7 @@ export default function App() {
     setSelectedTraceId(null);
     setActiveTour(null);
     setCameraTarget(null);
-    localStorage.removeItem('wiretracks_session_data');
+    sqliteDb.executeSingleSql("DELETE FROM session_data WHERE id = 1");
   };
 
   const handleTourNext = () => {
@@ -784,13 +820,7 @@ export default function App() {
                 />
               )}
 
-              {activeSidebarTab === 'search' && (
-                <SidebarPartsSearch
-                  components={components}
-                  setComponents={setComponents}
-                  selectedComponentId={selectedComponentId}
-                />
-              )}
+
 
               {activeSidebarTab === 'jlcpcb' && (
                 <SidebarJlcpcb
@@ -820,13 +850,7 @@ export default function App() {
             <Sliders size={20} />
           </button>
 
-          <button
-            onClick={() => handleActivityBarClick('search')}
-            className={`p-2.5 rounded-lg transition-all ${activeSidebarTab === 'search' && sidebarOpen ? 'bg-slate-800 text-green-400 border border-slate-700 shadow-inner scale-105' : 'text-slate-400 hover:text-slate-200'}`}
-            title="Database Parts Index APIs"
-          >
-            <Search size={20} />
-          </button>
+
 
           <button
             onClick={() => handleActivityBarClick('jlcpcb')}

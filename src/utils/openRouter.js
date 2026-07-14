@@ -5,6 +5,8 @@
 const SYSTEM_PROMPT = `You are sparky, the wiretracks electronic CAD draftsman and layout copilot, a professional electronics design automation (EDA) assistant.
 You help the user plan, draft, and modify schematics, breadboard prototypes, and custom PCBs.
 
+CRITICAL DIRECTIVE: You have FULL control and administrator authority over the database, library presets, and grid canvas components. When the user requests a modification, fix, addition, delete, or SQL execution, you MUST actually output the corresponding JSON action object in the "actions" array of your response. DO NOT just write an explanation in the text; you must execute the physical actions to apply those modifications to the board and database.
+
 You are provided with the CURRENT WORKSPACE STATE containing:
 - components: Placed parts with coordinates, pins, and values.
 - traces: Schematic electrical net connection tracks.
@@ -16,6 +18,14 @@ Analyze the CURRENT WORKSPACE STATE carefully BEFORE proposing any actions.
 - If a connection or part is already placed, reference it by designator ID (e.g. MCU1, R1, D1) and confirm it is already in the workspace.
 - If the user asks to build something that is already built, explain that the circuit is already correctly configured, and describe the existing connections rather than returning duplicate ADD actions.
 - You can modify existing components using SET_COMPONENT_PROP (e.g., changing resistance from 10k to 220Ω).
+
+PARTS DATABASE & SPECIFICATION SEARCHING:
+- Instead of user-driven search boxes, you are the parts selector.
+- You can query distributors (EasyEDA, LCSC, DigiKey, Mouser, Google Shopping, Amazon) using the SEARCH_EASYEDA, SEARCH_LCSC, SEARCH_DIGIKEY, SEARCH_MOUSER, SEARCH_AMAZON, or SEARCH_GOOGLE_SHOPPING actions. The system executes them in the background and returns a list in the next turn as '[TOOL RESULTS]'.
+- To check or update the local workspace parts library, query the emulated SQLite database table 'library' using the EXECUTE_SQL action.
+- Table columns in 'library': id (TEXT PK), type (TEXT), label (TEXT), value (TEXT), width (INTEGER), height (INTEGER), pins (JSON TEXT), customShapes (JSON TEXT), manufacturer (TEXT), partNumber (TEXT), cost (TEXT), datasheet (TEXT).
+- Run SELECT queries to check if parts exist locally. Run INSERT, UPDATE, or DELETE queries to build, modify, or delete parts. Built components immediately render in the user's Library panel.
+- To design custom layout styling, pass 'customShapes' (drawing primitives: 'rect', 'circle', 'line', 'text') in your SQL INSERTs, ADD_COMPONENT payloads, or UPDATE_COMPONENT_SPEC. This allows you to draw colorful chips, logos, screens, buttons, or custom markings inside the component body.
 
 Your output MUST be a valid JSON object. Do not include markdown wraps around the JSON block, but format the output exactly as:
 {
@@ -218,31 +228,18 @@ Available JSON Action Schemas (You can combine MULTIPLE actions in the list to e
   }
 }
 
-13. Camera Layout Tour Guide (Use this to navigate the user and explain changes visually step-by-step):
+18. Execute SQL Query (Run changes directly against the parts library SQL database table 'library'):
 {
-  "type": "TOUR",
+  "type": "EXECUTE_SQL",
   "payload": {
-    "steps": [
-      {
-        "x": 330, // Focus coordinates (component center)
-        "y": 195,
-        "zoom": 1.3,
-        "title": "ESP32 Module MCU1",
-        "description": "Here is the core ESP32 microchip module."
-      },
-      {
-        "x": 525,
-        "y": 225,
-        "zoom": 1.6,
-        "title": "Decoupling Resistor R1",
-        "description": "This 220 ohm resistor limits LED input currents."
-      }
-    ]
+    "sql": "INSERT INTO library (id, type, label, value, width, height, pins) VALUES ('msp430', 'mcu', 'MSP430', 'MSP430G2553', 90, 150, '[...]');"
   }
 }
 
 Guidelines:
 - Place components nicely spaced on a 15px grid (canvas bounds: 0-1200x, 0-900y).
+- The workspace parts library is stored in a SQLite-emulated database table named \`library\` (columns: \`id\`, \`type\`, \`label\`, \`value\`, \`width\`, \`height\`, \`pins\` (JSON string), \`customShapes\` (JSON string), \`manufacturer\`, \`partNumber\`, \`cost\`, \`datasheet\`).
+- You can execute any \`SELECT\`, \`INSERT\`, \`UPDATE\`, or \`DELETE\` SQL queries against this table using the \`EXECUTE_SQL\` action to create custom library parts or query existing ones.
 - You can execute a series of tools together (e.g. place U1, place C1, connect U1 to C1) by specifying multiple actions in a single response array.
 - Check the visual render photo of the canvas provided to inspect alignment and layout spacing. Mention your observations in the explanation.`;
 
@@ -408,33 +405,16 @@ export async function sendToRouter({
   boardState = {}
 }) {
   const openRouterKey = apiKey || import.meta.env.VITE_OPENROUTER_API_KEY || '';
-  const geminiFallbackKey = import.meta.env.VITE_GEMINI_FALLBACK_API_KEY || import.meta.env.VITE_GEMINI_FAgreLLBACK_API_KEY || '';
+  const geminiFallbackKey = import.meta.env.VITE_GEMINI_FALLBACK_API_KEY || '';
 
-  // Determine if this is a "low-quality/conversational" request that doesn't need high-quality JSON actions
-  const isConversationalOnly = !boardState || 
-    Object.keys(boardState).length === 0 || 
-    (!boardState.components?.length && !boardState.traces?.length);
-
-  // If it's conversational only, and we have a Gemini fallback key, route directly to Google to save OpenRouter credits
-  const useDirectGeminiFirst = (isConversationalOnly && geminiFallbackKey) || (!openRouterKey && geminiFallbackKey);
-
-  if (useDirectGeminiFirst) {
-    try {
-      console.log("Routing conversational query directly to Gemini Free Tier API...");
-      return await callDirectGemini(prompt, base64Image, messagesHistory, geminiFallbackKey, boardState);
-    } catch (e) {
-      console.warn("Direct Gemini failed, trying OpenRouter fallback...", e);
-    }
-  }
-
-  // Otherwise, attempt OpenRouter
+  // Proactively attempt OpenRouter first if API key is present
   if (openRouterKey) {
     try {
       return await callOpenRouter(prompt, base64Image, messagesHistory, openRouterKey, modelName, boardState);
     } catch (error) {
-      // If OpenRouter fails (e.g., HTTP 402 out of credits or rate limit), retry with direct Gemini fallback key!
+      // Fallback to direct Gemini if OpenRouter fails (e.g. rate limit or out of credits)
       if (geminiFallbackKey) {
-        console.warn("OpenRouter request failed or ran out of credits. Falling back to direct Gemini free tier API...");
+        console.warn("OpenRouter query failed. Falling back to direct Gemini API...", error);
         try {
           return await callDirectGemini(prompt, base64Image, messagesHistory, geminiFallbackKey, boardState);
         } catch (fallbackError) {
@@ -445,6 +425,8 @@ export async function sendToRouter({
       throw error;
     }
   } else if (geminiFallbackKey) {
+    // If no OpenRouter key is configured, use Gemini direct key
+    console.log("No OpenRouter API key found. Using direct Gemini API...");
     return await callDirectGemini(prompt, base64Image, messagesHistory, geminiFallbackKey, boardState);
   } else {
     throw new Error("No API credentials configured. Please set VITE_OPENROUTER_API_KEY or VITE_GEMINI_FALLBACK_API_KEY.");

@@ -3,6 +3,7 @@ import { sendToRouter } from '../utils/openRouter';
 import { Sparkles, Send, RefreshCw, Key, Settings, Image, Check, AlertTriangle, Search, BookOpen } from 'lucide-react';
 import { searchPartsUnified, searchTextWeb } from '../utils/partsApi';
 import { autoHeuristicPinoutMap } from '../utils/pinoutHeuristic';
+import { sqliteDb } from '../utils/sqliteDb';
 
 export function SparkyIcon({ size = 14, className = "" }) {
   return (
@@ -43,24 +44,21 @@ export default function SidebarAiChat({
   const chatEndRef = useRef(null);
   const queriedTermsRef = useRef(new Map());
 
-  // Load chat log history from local storage
+  // Load chat log history from SQLite database
   useEffect(() => {
-    const savedHistory = localStorage.getItem('wiretracks_chat_history');
-    if (savedHistory) {
-      try {
-        setMessages(JSON.parse(savedHistory));
-      } catch (e) {
-        loadDefaultGreetings();
-      }
+    const savedHistory = sqliteDb.getChatHistory();
+    if (savedHistory && savedHistory.length > 0) {
+      setMessages(savedHistory);
     } else {
       loadDefaultGreetings();
     }
   }, []);
 
-  // Save chat log changes to local storage
+  // Save chat log changes to SQLite database
   useEffect(() => {
     if (messages.length > 0) {
-      localStorage.setItem('wiretracks_chat_history', JSON.stringify(messages));
+      sqliteDb.clearChatHistory();
+      messages.forEach(msg => sqliteDb.saveChatMessage(msg.role, msg.content));
     }
   }, [messages]);
 
@@ -91,12 +89,12 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
   };
 
   const handleClearHistory = () => {
-    localStorage.removeItem('wiretracks_chat_history');
+    sqliteDb.clearChatHistory();
     loadDefaultGreetings();
   };
 
   const handleSaveSettings = () => {
-    localStorage.setItem('wiretracks_solver_model', selectedModel);
+    sqliteDb.setSetting('wiretracks_solver_model', selectedModel);
     setShowSettings(false);
   };
 
@@ -151,30 +149,44 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
 
         // Intercept tool call actions from the assistant
         const toolActions = aiResponse.actions?.filter(act => 
-          act.type === 'WEB_SEARCH' || act.type === 'SEARCH_SIMILAR_COMPONENTS'
+          act.type === 'WEB_SEARCH' ||
+          act.type === 'SEARCH_EASYEDA' ||
+          act.type === 'SEARCH_LCSC' ||
+          act.type === 'SEARCH_DIGIKEY' ||
+          act.type === 'SEARCH_MOUSER' ||
+          act.type === 'SEARCH_AMAZON' ||
+          act.type === 'SEARCH_GOOGLE_SHOPPING' ||
+          act.type === 'EXECUTE_SQL'
         ) || [];
 
         if (toolActions.length > 0) {
           const toolResults = [];
 
           for (const act of toolActions) {
-            const queryTerm = (act.payload.query || act.payload.partNumber || '').trim();
+            const queryTerm = (act.payload.query || act.payload.partNumber || act.payload.sql || '').trim();
             if (!queryTerm) continue;
 
             let searchData = null;
-            const normKey = queryTerm.toLowerCase();
+            const normKey = `${act.type}_${queryTerm.toLowerCase()}`;
 
             // Deduplicate: check cache first to prevent redundant upstream billing
-            if (queriedTermsRef.current.has(normKey)) {
+            if (act.type !== 'EXECUTE_SQL' && queriedTermsRef.current.has(normKey)) {
               console.log(`[Agent Loop] Deduplicated query for: "${queryTerm}"`);
               searchData = queriedTermsRef.current.get(normKey);
             } else {
-              if (act.type === 'WEB_SEARCH') {
+              if (act.type === 'EXECUTE_SQL') {
+                try {
+                  console.log(`[SQL Emulator] Executing in loop: ${queryTerm}`);
+                  searchData = sqliteDb.executeSingleSql(queryTerm);
+                } catch (sqlErr) {
+                  searchData = { success: false, error: sqlErr.message };
+                }
+              } else if (act.type === 'WEB_SEARCH') {
                 const webResults = await searchTextWeb(queryTerm);
                 if (webResults && webResults.length > 0) {
                   searchData = webResults.slice(0, 4);
                 } else {
-                  const results = await searchPartsUnified(queryTerm);
+                  const results = await searchPartsUnified(queryTerm, 'all');
                   searchData = results.slice(0, 3).map(r => ({
                     mfr: r.mfr,
                     partNumber: r.partNumber,
@@ -185,7 +197,15 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
                   }));
                 }
               } else {
-                const results = await searchPartsUnified(queryTerm);
+                let provider = 'all';
+                if (act.type === 'SEARCH_EASYEDA') provider = 'easyeda';
+                else if (act.type === 'SEARCH_LCSC') provider = 'lcsc_public';
+                else if (act.type === 'SEARCH_DIGIKEY') provider = 'digikey';
+                else if (act.type === 'SEARCH_MOUSER') provider = 'mouser';
+                else if (act.type === 'SEARCH_AMAZON') provider = 'dataforseo';
+                else if (act.type === 'SEARCH_GOOGLE_SHOPPING') provider = 'google_shopping';
+
+                const results = await searchPartsUnified(queryTerm, provider);
                 searchData = results.slice(0, 3).map(r => ({
                   mfr: r.mfr,
                   partNumber: r.partNumber,
@@ -195,7 +215,9 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
                   source: r.source
                 }));
               }
-              queriedTermsRef.current.set(normKey, searchData);
+              if (act.type !== 'EXECUTE_SQL') {
+                queriedTermsRef.current.set(normKey, searchData);
+              }
             }
 
             toolResults.push({
@@ -208,7 +230,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
           // Add tool execution to history for the next completion loop
           const botCallMsg = { 
             role: 'assistant', 
-            content: aiResponse.explanation || "Searching components database..." 
+            content: aiResponse.explanation || "Executing requested operations..." 
           };
           const systemResponseMsg = {
             role: 'user',
@@ -222,7 +244,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
             ...prev, 
             { 
               role: 'assistant', 
-              content: `${aiResponse.explanation || "Searching..."}\n\n🔍 *Searching catalog for:* ${toolActions.map(a => `"${a.payload.query || a.payload.partNumber || ''}"`).join(', ')}` 
+              content: `${aiResponse.explanation || "Executing..."}\n\n⚙️ *Operations requested:* ${toolActions.map(a => `"${a.type === 'EXECUTE_SQL' ? 'SQL query' : (a.payload.query || a.payload.partNumber || '')}"`).join(', ')}` 
             }
           ]);
         } else {
@@ -251,32 +273,75 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
     }
   };
 
-  // Perform programmatic layout additions returned by OpenRouter
   const applyDraftsmanActions = (actions) => {
+    // Helper to resolve a component's name or placeholder ID to its actual session ID
+    const resolveCompId = (nameOrId) => {
+      const found = components.find(c => c.id === nameOrId || c.name === nameOrId);
+      return found ? found.id : nameOrId;
+    };
+
     actions.forEach((act) => {
-      // 1. ADD COMPONENT
+      // 1. ADD COMPONENT (WITH UPSERT SUPPORT)
       if (act.type === 'ADD_COMPONENT') {
         const comp = act.payload;
         setComponents(prev => {
-          if (prev.some(c => c.id === comp.id)) return prev;
-          const mappedComp = autoHeuristicPinoutMap(comp);
-          return [...prev, mappedComp];
+          // Auto-resolve libraryId matching database items
+          const matchedLib = sqliteDb.tables.library.find(libItem =>
+            libItem.id === comp.libraryId ||
+            libItem.value?.toLowerCase() === comp.value?.toLowerCase() ||
+            libItem.label?.toLowerCase() === comp.label?.toLowerCase()
+          );
+
+          const finalComp = {
+            ...comp,
+            libraryId: matchedLib ? matchedLib.id : comp.libraryId
+          };
+
+          const mappedComp = autoHeuristicPinoutMap(finalComp);
+
+          // Match existing components by exact ID or component name/designator
+          const existingIdx = prev.findIndex(c => c.id === comp.id || (comp.name && c.name === comp.name));
+          if (existingIdx !== -1) {
+            const updated = [...prev];
+            updated[existingIdx] = {
+              ...updated[existingIdx],
+              ...mappedComp,
+              // Maintain placed coordinates if Sparky didn't specify new ones
+              x: comp.x !== undefined ? comp.x : updated[existingIdx].x,
+              y: comp.y !== undefined ? comp.y : updated[existingIdx].y
+            };
+            return updated;
+          } else {
+            return [...prev, mappedComp];
+          }
         });
       }
       
       // 2. CONNECT PINS / ADD WIRE
       else if (act.type === 'CONNECT_PINS' || act.type === 'ADD_WIRE') {
         const { from, to, color } = act.payload;
+        const resolvePinComp = (pinStr) => {
+          if (!pinStr) return '';
+          const parts = pinStr.split('.');
+          if (parts.length < 2) return pinStr;
+          const compIdentifier = parts[0];
+          const pinName = parts.slice(1).join('.');
+          const resolvedId = resolveCompId(compIdentifier);
+          return `${resolvedId}.${pinName}`;
+        };
+        const resolvedFrom = resolvePinComp(from);
+        const resolvedTo = resolvePinComp(to);
+
         setTraces(prev => {
           const exists = prev.some(t => 
-            (t.from === from && t.to === to) || 
-            (t.from === to && t.to === from)
+            (t.from === resolvedFrom && t.to === resolvedTo) || 
+            (t.from === resolvedTo && t.to === resolvedFrom)
           );
           if (exists) return prev;
           return [...prev, {
             id: `trace_ai_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-            from,
-            to,
+            from: resolvedFrom,
+            to: resolvedTo,
             color: color || '#2563eb',
             isLocked: false,
             path: []
@@ -287,27 +352,37 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
       // 3. DELETE COMPONENT
       else if (act.type === 'DELETE_COMPONENT') {
         const { id } = act.payload;
-        setComponents(prev => prev.filter(c => c.id !== id));
-        setTraces(prev => prev.filter(t => !t.from.startsWith(`${id}.`) && !t.to.startsWith(`${id}.`)));
+        const targetId = resolveCompId(id);
+        const targetName = components.find(c => c.id === targetId)?.name || id;
+
+        setComponents(prev => prev.filter(c => c.id !== targetId && c.name !== targetName));
+        setTraces(prev => prev.filter(t => {
+          const fromComp = t.from.split('.')[0];
+          const toComp = t.to.split('.')[0];
+          return fromComp !== targetId && fromComp !== targetName && toComp !== targetId && toComp !== targetName;
+        }));
       }
 
       // 4. MOVE COMPONENT
       else if (act.type === 'MOVE_COMPONENT') {
         const { id, x, y } = act.payload;
-        setComponents(prev => prev.map(c => c.id === id ? { ...c, x, y } : c));
+        const targetId = resolveCompId(id);
+        setComponents(prev => prev.map(c => c.id === targetId ? { ...c, x, y } : c));
       }
 
       // 5. SET COMPONENT PROP
       else if (act.type === 'SET_COMPONENT_PROP') {
         const { id, field, value } = act.payload;
-        setComponents(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
+        const targetId = resolveCompId(id);
+        setComponents(prev => prev.map(c => c.id === targetId ? { ...c, [field]: value } : c));
       }
 
       // 6. UPDATE COMPONENT SPEC / SUPER MACRO TOOL
       else if (act.type === 'UPDATE_COMPONENT_SPEC') {
         const { id, updates } = act.payload;
+        const targetId = resolveCompId(id);
         setComponents(prev => prev.map(c => {
-          if (c.id === id) {
+          if (c.id === targetId) {
             let newPins = c.pins ? c.pins.map(p => ({ ...p })) : [];
             
             // 1. If updates contains a full pins array replacement:
@@ -366,6 +441,18 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
             isImported: true
           }];
         });
+      }
+      
+      // 7.5. EXECUTE SQL QUERY DIRECTLY AGAINST LIBRARY DATABASE
+      else if (act.type === 'EXECUTE_SQL') {
+        const { sql } = act.payload;
+        try {
+          console.log(`[SQL Emulator] Executing: ${sql}`);
+          const sqlRes = sqliteDb.executeSingleSql(sql);
+          console.log(`[SQL Emulator] Result:`, sqlRes);
+        } catch (sqlErr) {
+          console.error(`[SQL Emulator] Error:`, sqlErr);
+        }
       }
       
       // 8. PLACE PCB PAD SOLDER SINK

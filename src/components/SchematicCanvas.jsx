@@ -92,10 +92,10 @@ const getConnectedPins = (compId, pinName, currentTraces = [], currentComps = []
   visited.forEach(pinStr => {
     if (pinStr === startPinStr) return;
     const [cId, pName] = pinStr.split('.');
-    const comp = currentComps.find(c => c.id === cId);
+    const comp = currentComps.find(c => c.id === cId || c.name === cId);
     if (comp) {
       list.push({
-        compId: cId,
+        compId: comp.id,
         compLabel: comp.label || comp.partNumber || comp.name,
         pinName: pName
       });
@@ -313,8 +313,8 @@ export default function SchematicCanvas({
       const [startCompId, startPinName] = trace.from.split('.');
       const [endCompId, endPinName] = trace.to.split('.');
 
-      const startComp = currentComps.find(c => c.id === startCompId);
-      const endComp = currentComps.find(c => c.id === endCompId);
+      const startComp = currentComps.find(c => c.id === startCompId || c.name === startCompId);
+      const endComp = currentComps.find(c => c.id === endCompId || c.name === endCompId);
 
       if (!startComp || !endComp) return;
 
@@ -418,20 +418,25 @@ export default function SchematicCanvas({
     }
 
     // 2. Draw custom outline shapes
-    if (layersVisibility.shapes) {
-      customShapes.forEach(shape => {
-        ctx.strokeStyle = shape.color || '#3b82f6';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 4]);
-        ctx.strokeRect(shape.x1, shape.y1, shape.x2 - shape.x1, shape.y2 - shape.y1);
-        ctx.setLineDash([]);
-        
-        ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
-        ctx.fillRect(Math.min(shape.x1, shape.x2), Math.min(shape.y1, shape.y2), 65, 14);
-        ctx.font = '8px Inter, sans-serif';
-        ctx.fillStyle = '#1d4ed8';
-        ctx.fillText("Boundary Box", Math.min(shape.x1, shape.x2) + 5, Math.min(shape.y1, shape.y2) + 10);
-      });
+    if (layersVisibility.shapes && customShapes) {
+      let shapesList = customShapes;
+      if (typeof shapesList === 'string') {
+        try { shapesList = JSON.parse(shapesList); } catch (e) { shapesList = []; }
+      }
+      if (Array.isArray(shapesList)) {
+        shapesList.forEach(shape => {
+          ctx.strokeStyle = shape.color || '#3b82f6';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 4]);
+          ctx.strokeRect(shape.x1, shape.y1, shape.x2 - shape.x1, shape.y2 - shape.y1);
+          ctx.setLineDash([]);
+          ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+          ctx.fillRect(Math.min(shape.x1, shape.x2), Math.min(shape.y1, shape.y2), 65, 14);
+          ctx.font = '8px Inter, sans-serif';
+          ctx.fillStyle = '#1d4ed8';
+          ctx.fillText("Boundary Box", Math.min(shape.x1, shape.x2) + 5, Math.min(shape.y1, shape.y2) + 10);
+        });
+      }
 
       if (activeTool === 'shape' && drawingShapeStart) {
         ctx.strokeStyle = '#3b82f6';
@@ -516,7 +521,42 @@ export default function SchematicCanvas({
         ctx.stroke();
 
         // Draw microchip CAD graphics for MCUs / Custom chips
-        if (comp.type === 'mcu' || comp.pins?.length > 4) {
+        let compShapes = comp.customShapes;
+        if (typeof compShapes === 'string') {
+          try { compShapes = JSON.parse(compShapes); } catch(e) { compShapes = []; }
+        }
+        if (Array.isArray(compShapes) && compShapes.length > 0) {
+          compShapes.forEach(shape => {
+            ctx.save();
+            ctx.fillStyle = shape.fill || 'transparent';
+            ctx.strokeStyle = shape.stroke || 'transparent';
+            ctx.lineWidth = shape.strokeWidth || 1;
+            
+            if (shape.type === 'rect') {
+              ctx.beginPath();
+              ctx.rect(comp.x + (shape.x || 0), comp.y + (shape.y || 0), shape.w || 0, shape.h || 0);
+              if (shape.fill && shape.fill !== 'transparent') ctx.fill();
+              if (shape.stroke && shape.stroke !== 'transparent') ctx.stroke();
+            } else if (shape.type === 'circle') {
+              ctx.beginPath();
+              ctx.arc(comp.x + (shape.cx || 0), comp.y + (shape.cy || 0), shape.r || 0, 0, 2 * Math.PI);
+              if (shape.fill && shape.fill !== 'transparent') ctx.fill();
+              if (shape.stroke && shape.stroke !== 'transparent') ctx.stroke();
+            } else if (shape.type === 'line') {
+              ctx.beginPath();
+              ctx.moveTo(comp.x + (shape.x1 || 0), comp.y + (shape.y1 || 0));
+              ctx.lineTo(comp.x + (shape.x2 || 0), comp.y + (shape.y2 || 0));
+              ctx.stroke();
+            } else if (shape.type === 'text') {
+              ctx.fillStyle = shape.fill || '#ffffff';
+              ctx.font = shape.font || '9px sans-serif';
+              ctx.textAlign = shape.align || 'center';
+              ctx.textBaseline = shape.baseline || 'middle';
+              ctx.fillText(shape.text || '', comp.x + (shape.x || 0), comp.y + (shape.y || 0));
+            }
+            ctx.restore();
+          });
+        } else if (comp.type === 'mcu' || comp.pins?.length > 4) {
           // Top antenna area
           ctx.fillStyle = '#020617'; // Darker antenna area
           ctx.fillRect(comp.x + 4, comp.y + 4, comp.width - 8, Math.round(comp.height * 0.12));
@@ -586,8 +626,13 @@ export default function SchematicCanvas({
         ctx.fillText(comp.value, comp.x + comp.width / 2, comp.y + comp.height + 12);
 
         const isCadBoard = comp.type === 'mcu' || comp.pins?.length > 4;
-
-        comp.pins.forEach((pin) => {
+        
+        let compPins = comp.pins;
+        if (typeof compPins === 'string') {
+          try { compPins = JSON.parse(compPins); } catch (e) { compPins = []; }
+        }
+        if (Array.isArray(compPins)) {
+          compPins.forEach((pin) => {
           const px = comp.x + pin.x;
           const py = comp.y + pin.y;
 
@@ -745,7 +790,8 @@ export default function SchematicCanvas({
           ctx.fillText(pin.name, labelX, labelY);
           ctx.restore();
         });
-      });
+      }
+    });
     }
 
     // 6. Draw custom labels / texts

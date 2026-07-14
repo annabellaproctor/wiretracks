@@ -22,6 +22,27 @@ export default function PcbCanvas({
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   
+  // Parse traces into object format `{ componentId, pin }` for the autorouter/DRC logic
+  const parsedTraces = React.useMemo(() => {
+    return traces.map(t => {
+      let fromObj = t.from;
+      let toObj = t.to;
+      if (typeof t.from === 'string') {
+        const [fromComp, fromPin] = t.from.split('.');
+        fromObj = { componentId: fromComp, pin: fromPin };
+      }
+      if (typeof t.to === 'string') {
+        const [toComp, toPin] = t.to.split('.');
+        toObj = { componentId: toComp, pin: toPin };
+      }
+      return {
+        ...t,
+        from: fromObj,
+        to: toObj
+      };
+    });
+  }, [traces]);
+  
   // Transform and size settings
   const [pan, setPan] = useState({ x: 60, y: 60 });
   const [zoom, setZoom] = useState(0.85);
@@ -118,7 +139,7 @@ export default function PcbCanvas({
       components.forEach(comp => {
         const footprint = getPcbFootprint(comp);
         footprint.pads.forEach(pad => {
-          const padNetId = traces.find(t => 
+          const padNetId = parsedTraces.find(t => 
             (t.from.componentId === comp.id && t.from.pin === pad.name) ||
             (t.to.componentId === comp.id && t.to.pin === pad.name)
           )?.id;
@@ -139,7 +160,7 @@ export default function PcbCanvas({
     });
 
     // 3. Check for disconnected nets / orphans
-    traces.forEach(net => {
+    parsedTraces.forEach(net => {
       const compFrom = components.find(c => c.id === net.from.componentId);
       const compTo = components.find(c => c.id === net.to.componentId);
       if (!compFrom || !compTo) return;
@@ -306,7 +327,7 @@ export default function PcbCanvas({
     console.log("[PCB Autorouter] Running Multi-Layer Maze search...");
     const newTraces = [];
 
-    traces.forEach(net => {
+    parsedTraces.forEach(net => {
       const compFrom = components.find(c => c.id === net.from.componentId);
       const compTo = components.find(c => c.id === net.to.componentId);
       if (!compFrom || !compTo) return;
