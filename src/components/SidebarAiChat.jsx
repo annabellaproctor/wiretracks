@@ -30,8 +30,9 @@ export default function SidebarAiChat({
   handleClearAll,
   setActiveTour,
   selectedModel,
-  setSelectedModel
+  setSelectedModel,
 }) {
+  console.log("THIS IS MY CUSTOM SIDEBAR AI CHAT LOG!!!");
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -276,7 +277,11 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
   const applyDraftsmanActions = (actions) => {
     // Helper to resolve a component's name or placeholder ID to its actual session ID
     const resolveCompId = (nameOrId) => {
-      const found = components.find(c => c.id === nameOrId || c.name === nameOrId);
+      const found = components.find(c => 
+        c.id === nameOrId || 
+        c.name === nameOrId || 
+        c.label === nameOrId
+      );
       return found ? found.id : nameOrId;
     };
 
@@ -288,37 +293,52 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
           // Auto-resolve libraryId matching database items
           const matchedLib = sqliteDb.tables.library.find(libItem =>
             libItem.id === comp.libraryId ||
+            (comp.libraryId && (
+              libItem.id.toLowerCase().includes(comp.libraryId.toLowerCase()) ||
+              comp.libraryId.toLowerCase().includes(libItem.id.toLowerCase())
+            )) ||
             libItem.value?.toLowerCase() === comp.value?.toLowerCase() ||
             libItem.label?.toLowerCase() === comp.label?.toLowerCase()
           );
 
+          const compId = comp.id || comp.name || comp.label || `comp_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
           const finalComp = {
+            id: compId,
             ...comp,
+            name: comp.name || comp.label || `${comp.type.toUpperCase()}${prev.filter(c => c.type === comp.type).length + 1}`,
+            label: matchedLib ? matchedLib.label : (comp.label || comp.type),
+            x: (comp.x !== undefined && comp.x !== null && !isNaN(comp.x)) ? comp.x : 100,
+            y: (comp.y !== undefined && comp.y !== null && !isNaN(comp.y)) ? comp.y : 100,
             libraryId: matchedLib ? matchedLib.id : comp.libraryId
           };
 
           const mappedComp = autoHeuristicPinoutMap(finalComp);
+          console.log('[AI_ADD_COMP] finalComp:', JSON.stringify(finalComp));
+          console.log('[AI_ADD_COMP] mappedComp:', JSON.stringify(mappedComp));
 
           // Match existing components by exact ID or component name/designator
-          const existingIdx = prev.findIndex(c => c.id === comp.id || (comp.name && c.name === comp.name));
+          const existingIdx = prev.findIndex(c => c.id === compId || (comp.name && c.name === comp.name));
           if (existingIdx !== -1) {
             const updated = [...prev];
             updated[existingIdx] = {
               ...updated[existingIdx],
               ...mappedComp,
               // Maintain placed coordinates if Sparky didn't specify new ones
-              x: comp.x !== undefined ? comp.x : updated[existingIdx].x,
-              y: comp.y !== undefined ? comp.y : updated[existingIdx].y
+              x: (comp.x !== undefined && comp.x !== null && !isNaN(comp.x)) ? comp.x : (updated[existingIdx].x || 100),
+              y: (comp.y !== undefined && comp.y !== null && !isNaN(comp.y)) ? comp.y : (updated[existingIdx].y || 100)
             };
+            console.log('[AI_ADD_COMP] returning updated:', JSON.stringify(updated));
             return updated;
           } else {
-            return [...prev, mappedComp];
+            const nextComps = [...prev, mappedComp];
+            console.log('[AI_ADD_COMP] returning nextComps:', JSON.stringify(nextComps));
+            return nextComps;
           }
         });
       }
       
       // 2. CONNECT PINS / ADD WIRE
-      else if (act.type === 'CONNECT_PINS' || act.type === 'ADD_WIRE') {
+      else if (act.type === 'CONNECT_PINS' || act.type === 'ADD_WIRE' || act.type === 'ADD_TRACE') {
         const { from, to, color } = act.payload;
         const resolvePinComp = (pinStr) => {
           if (!pinStr) return '';
@@ -342,7 +362,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
             id: `trace_ai_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
             from: resolvedFrom,
             to: resolvedTo,
-            color: color || '#2563eb',
+            color: color || 'auto',
             isLocked: false,
             path: []
           }];
@@ -564,7 +584,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
   return (
     <div className="h-full flex flex-col bg-slate-50/70 overflow-hidden">
       {/* Header */}
-      <div className="p-4 border-b border-slate-200 bg-white/50 backdrop-blur-xs flex items-center justify-between">
+      <div className="p-4 border-b border-slate-100 bg-white/50 backdrop-blur-xs flex items-center justify-between">
         <div className="flex items-center space-x-1.5">
           <SparkyIcon size={16} />
           <span className="text-xs font-bold text-slate-700 lowercase tracking-tight">sparky</span>
@@ -589,7 +609,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="p-4 bg-white border-b border-slate-200 space-y-3 font-sans text-xs shadow-xs">
+        <div className="p-4 bg-white border-b border-slate-100 space-y-3 font-sans text-xs shadow-xs">
           <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
             <span className="font-bold text-slate-700 flex items-center"><Key size={12} className="mr-1 text-slate-500" /> Router Key Configuration</span>
             <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600">✕</button>
@@ -614,7 +634,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-slate-50 focus:bg-white outline-none focus:border-amber-500 transition"
+                className="w-full px-2.5 py-1.5 border border-slate-100 rounded-lg text-xs bg-slate-50 focus:bg-white outline-none focus:border-amber-500 transition"
               >
                 <option value="google/gemini-2.5-flash">Gemini 2.5 Flash (Vision + Fast)</option>
                 <option value="meta-llama/llama-3.2-11b-vision-instruct:free">Llama 3.2 11B Vision (Free)</option>
@@ -646,7 +666,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
             key={idx}
             className={`flex flex-col max-w-[85%] rounded-2xl p-3.5 shadow-xs ${
               msg.role === 'assistant'
-                ? 'bg-white text-slate-800 self-start border border-slate-200/80'
+                ? 'bg-white text-slate-800 self-start border border-slate-100/80'
                 : 'bg-slate-900 text-white self-end'
             }`}
           >
@@ -664,7 +684,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
           </div>
         ))}
         {loading && (
-          <div className="flex items-center space-x-2 bg-white/90 p-3 border border-slate-200/60 rounded-xl self-start shadow-xs">
+          <div className="flex items-center space-x-2 bg-white/90 p-3 border border-slate-100/60 rounded-xl self-start shadow-xs">
             <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce"></div>
             <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce [animation-delay:0.2s]"></div>
             <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce [animation-delay:0.4s]"></div>
@@ -675,7 +695,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
       </div>
 
       {/* Quick Actions Triggers */}
-      <div className="p-2 border-t border-slate-200 bg-white/30 flex flex-wrap gap-1.5">
+      <div className="p-2 border-t border-slate-100 bg-white/30 flex flex-wrap gap-1.5">
         <button
           onClick={() => handleSend("Add LM7805 voltage regulator")}
           className="px-2 py-1 bg-white hover:bg-slate-50 border border-slate-250 text-slate-600 rounded-lg text-[9px] font-semibold flex items-center transition cursor-pointer"
@@ -697,7 +717,7 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
       </div>
 
       {/* Vision Toggles */}
-      <div className="p-2 border-t border-slate-200 bg-white/50 flex items-center justify-between text-[10px] text-slate-500 font-semibold select-none">
+      <div className="p-2 border-t border-slate-100 bg-white/50 flex items-center justify-between text-[10px] text-slate-500 font-semibold select-none">
         <label className="flex items-center cursor-pointer">
           <input
             type="checkbox"
@@ -713,14 +733,14 @@ I am your wiretracks electronic CAD draftsman and layout copilot. I can inspect 
       </div>
 
       {/* Input Form */}
-      <div className="p-3 border-t border-slate-200 bg-white flex items-center space-x-2">
+      <div className="p-3 border-t border-slate-100 bg-white flex items-center space-x-2">
         <input
           type="text"
           placeholder={loading ? "Waiting..." : "Ask sparky to plan components or route wires..."}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') handleSend(); }}
-          className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg focus:outline-none focus:border-amber-500 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-amber-500/10 transition font-sans text-xs"
+          className="flex-1 px-3 py-1.5 border border-slate-100 rounded-lg focus:outline-none focus:border-amber-500 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-amber-500/10 transition font-sans text-xs"
           disabled={loading}
         />
         <button

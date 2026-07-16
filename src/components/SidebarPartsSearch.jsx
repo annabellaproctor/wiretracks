@@ -681,7 +681,7 @@ Example JSON:
 
   return (
     <div className="h-full flex flex-col bg-slate-50/70 overflow-hidden">
-      <div className="p-4 border-b border-slate-200 bg-white/50 backdrop-blur-xs space-y-2.5">
+      <div className="p-4 border-b border-slate-100 bg-white/50 backdrop-blur-xs space-y-2.5">
         {/* Dynamic API Status Connectivity Panel */}
         <div className="bg-slate-900 text-white rounded-xl p-2.5 space-y-1.5 border border-slate-800 shadow-inner">
           <div className="flex justify-between items-center text-[8px] font-bold text-slate-400 uppercase tracking-wider">
@@ -733,7 +733,7 @@ Example JSON:
             placeholder="Search part numbers, values, or regulators..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-lg focus:outline-none focus:border-amber-500 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-amber-500/10 transition font-sans text-xs"
+            className="w-full pl-8 pr-3 py-1.5 border border-slate-100 rounded-lg focus:outline-none focus:border-amber-500 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-amber-500/10 transition font-sans text-xs"
           />
           <Search size={13} className="absolute left-2.5 top-2.5 text-slate-400" />
           <button type="submit" className="hidden" />
@@ -746,9 +746,10 @@ Example JSON:
             <select
               value={selectedProvider}
               onChange={(e) => setSelectedProvider(e.target.value)}
-              className="flex-1 bg-white border border-slate-200 rounded-md py-1 px-1.5 text-[10px] text-slate-650 outline-none focus:border-amber-500 transition cursor-pointer font-sans"
+              className="flex-1 bg-white border border-slate-100 rounded-md py-1 px-1.5 text-[10px] text-slate-650 outline-none focus:border-amber-500 transition cursor-pointer font-sans"
             >
               <option value="all">Unified (Automatic Search Routing)</option>
+              <option value="partcount">Partcount™ (Local Home Lab Inventory)</option>
               <option value="easyeda">EasyEDA (High Reputability, Unlimited Quota)</option>
               <option value="lcsc_public">LCSC Fallback (High Reputability, Unlimited Quota)</option>
               <option value="digikey">DigiKey API (Excellent Reputability, High Quota)</option>
@@ -763,7 +764,7 @@ Example JSON:
       </div>
 
       {/* Selected Component Reminder */}
-      <div className="px-4 py-2 border-b border-slate-200 flex items-center justify-between text-[10px] bg-amber-50/30">
+      <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-between text-[10px] bg-amber-50/30">
         {selectedComp ? (
           <div className="flex items-center space-x-1.5 text-amber-700">
             <Check size={11} className="text-amber-600" />
@@ -780,21 +781,24 @@ Example JSON:
       {/* Search Results */}
       <div className="flex-1 overflow-y-auto p-3 space-y-2.5 bg-white/20">
         {loading ? (
-          <div className="flex flex-col items-center justify-center text-center h-48 text-slate-400 bg-white border border-slate-200 rounded-xl shadow-xs p-4">
+          <div className="flex flex-col items-center justify-center text-center h-48 text-slate-400 bg-white border border-slate-100 rounded-xl shadow-xs p-4">
             <Loader2 size={20} className="mb-2 text-amber-500 animate-spin" />
             <p className="text-xs font-semibold text-slate-600">Querying live distributor indices...</p>
             <p className="text-[9px] text-slate-400 mt-1">Contacting Mouser Catalog & searching component footprints</p>
           </div>
         ) : searchResults.length > 0 ? (
           searchResults.map((part, idx) => (
-            <div key={idx} className="border border-slate-200 rounded-xl p-3.5 hover:border-slate-300 hover:shadow-xs transition text-xs flex flex-col bg-white shadow-xs">
+            <div key={idx} className="border border-slate-100 rounded-xl p-3.5 hover:border-slate-300 hover:shadow-xs transition text-xs flex flex-col bg-white shadow-xs">
               {part.image && (
                 <div className="mb-2.5 w-full h-20 bg-slate-50 rounded-lg flex items-center justify-center overflow-hidden border border-slate-100 select-none">
                   <img src={part.image} alt={part.partNumber} className="max-h-full max-w-full object-contain mix-blend-multiply" />
                 </div>
               )}
               <div className="flex items-center justify-between mb-1">
-                <span className="font-bold text-slate-800 text-[12px]">{part.partNumber}</span>
+                <span className="font-bold text-slate-800 text-[12px]">
+                  {part.source === 'Partcount' && <span className="text-amber-500 font-bold mr-1">★</span>}
+                  {part.partNumber}
+                </span>
                 <span className="text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded-lg font-mono uppercase">{part.package}</span>
               </div>
               <span className="text-[10px] text-slate-400 font-medium mb-1.5">{part.mfr}</span>
@@ -807,17 +811,17 @@ Example JSON:
               <div className="mt-2.5">
                 <button
                   onClick={() => setExpandedPartIdx(expandedPartIdx === idx ? null : idx)}
-                  className="w-full text-center py-1 bg-slate-50 border border-slate-200 rounded text-[9px] text-slate-500 font-bold hover:bg-slate-100 transition cursor-pointer"
+                  className="w-full text-center py-1 bg-slate-50 border border-slate-100 rounded text-[9px] text-slate-500 font-bold hover:bg-slate-100 transition cursor-pointer"
                 >
                   {expandedPartIdx === idx ? "Hide Price Matrix" : "Compare Multi-Source Prices"}
                 </button>
                 
                 {expandedPartIdx === idx && (
-                  <div className="mt-1.5 border border-slate-200 rounded-lg bg-slate-50 p-2 space-y-1.5 shadow-inner">
+                  <div className="mt-1.5 border border-slate-100 rounded-lg bg-slate-50 p-2 space-y-1.5 shadow-inner">
                     <span className="text-[8px] text-slate-400 font-bold uppercase tracking-wider block">Supplier Pricing Grid</span>
                     <table className="w-full text-[9px] font-sans text-slate-650">
                       <thead>
-                        <tr className="border-b border-slate-200 text-slate-400 text-left font-bold uppercase text-[7px]">
+                        <tr className="border-b border-slate-100 text-slate-400 text-left font-bold uppercase text-[7px]">
                           <th className="pb-1">Source</th>
                           <th className="pb-1">Est Unit Price</th>
                           <th className="pb-1 text-right">Delivery</th>
@@ -858,8 +862,12 @@ Example JSON:
 
               <div className="flex items-center justify-between mt-auto pt-2.5 border-t border-slate-100">
                 <div className="flex flex-col text-[10px]">
-                  <span className="font-mono text-slate-800 font-bold">{part.price} <span className="text-[8px] text-slate-400 font-normal">/ unit</span></span>
-                  <span className="text-emerald-600 font-bold mt-0.5">{part.stock}</span>
+                  {part.source === 'Partcount' ? (
+                    <span className="font-mono text-amber-600 font-bold uppercase tracking-wider text-[8px]">Local Bench Stock</span>
+                  ) : (
+                    <span className="font-mono text-slate-800 font-bold">{part.price} <span className="text-[8px] text-slate-400 font-normal">/ unit</span></span>
+                  )}
+                  <span className={`${part.source === 'Partcount' ? 'text-amber-600' : 'text-emerald-600'} font-bold mt-0.5`}>{part.stock}</span>
                 </div>
 
                 <div className="flex space-x-1.5">
@@ -892,13 +900,13 @@ Example JSON:
           ))
         ) : (
           searched ? (
-            <div className="flex flex-col items-center justify-center text-center h-48 text-slate-400 bg-white border border-slate-200 rounded-xl shadow-xs p-4">
+            <div className="flex flex-col items-center justify-center text-center h-48 text-slate-400 bg-white border border-slate-100 rounded-xl shadow-xs p-4">
               <AlertCircle size={18} className="mb-1.5 text-slate-300" />
               <p className="text-xs font-semibold text-slate-500">No matching components found.</p>
               <p className="text-[10px] text-slate-400 mt-1 max-w-[160px] leading-normal mx-auto">Try searching 'LM7805', 'ESP32', 'resistor', or 'capacitor'.</p>
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center text-center h-48 text-slate-400 bg-white border border-slate-200 rounded-xl shadow-xs p-4">
+            <div className="flex flex-col items-center justify-center text-center h-48 text-slate-400 bg-white border border-slate-100 rounded-xl shadow-xs p-4">
               <Search size={20} className="mb-2 text-slate-300 animate-pulse" />
               <p className="text-xs font-semibold text-slate-500">Search Component Catalog</p>
               <p className="text-[10px] text-slate-400 mt-1 max-w-[170px] leading-normal mx-auto">Enter part codes or component categories to link real datasheet specs to your tracks.</p>

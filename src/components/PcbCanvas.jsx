@@ -148,9 +148,7 @@ export default function PcbCanvas({
           if (trace.netId !== padNetId) {
             for (let i = 0; i < trace.points.length - 1; i++) {
               const dist = distToSegment(pad, trace.points[i], trace.points[i+1]);
-              const isNearStart = Math.hypot(pad.x - trace.points[0].x, pad.y - trace.points[0].y) < 15;
-              const isNearEnd = Math.hypot(pad.x - trace.points[trace.points.length - 1].x, pad.y - trace.points[trace.points.length - 1].y) < 15;
-              if (dist > 0 && dist < 12 && !isNearStart && !isNearEnd) {
+              if (dist > 0 && dist < 12) {
                 errors.push(`Clearance Limit: Track too close to pad ${comp.name}.${pad.name} (${Math.round(dist)}px).`);
               }
             }
@@ -189,7 +187,7 @@ export default function PcbCanvas({
   };
 
   // Programmatic Multi-Layer A* Maze Router
-  const findAStarPath = (startX, startY, endX, endY, netId, currentTraces) => {
+  const findAStarPath = (startX, startY, endX, endY, netId, currentTraces, physStartX, physStartY, physEndX, physEndY) => {
     const openSet = [];
     const closedSet = new Set();
 
@@ -239,11 +237,12 @@ export default function PcbCanvas({
       for (const comp of components) {
         const footprint = getPcbFootprint(comp);
         for (const pad of footprint.pads) {
-          const isStartPad = Math.hypot(x - startX, y - startY) < 15;
-          const isEndPad = Math.hypot(x - endX, y - endY) < 15;
+          // Skip collision check ONLY for the actual start and end pads of this trace net
+          const isStartPad = Math.hypot(pad.x - physStartX, pad.y - physStartY) < 5;
+          const isEndPad = Math.hypot(pad.x - physEndX, pad.y - physEndY) < 5;
           if (isStartPad || isEndPad) continue;
 
-          if (Math.hypot(x - pad.x, y - pad.y) < 15) {
+          if (Math.hypot(x - pad.x, y - pad.y) < 14) {
             return true; 
           }
         }
@@ -254,7 +253,7 @@ export default function PcbCanvas({
         if (trace.netId !== netId && trace.layer === layer) {
           for (let i = 0; i < trace.points.length - 1; i++) {
             const dist = distToSegment({ x, y }, trace.points[i], trace.points[i+1]);
-            if (dist < 15) {
+            if (dist < 12) {
               return true; 
             }
           }
@@ -268,7 +267,7 @@ export default function PcbCanvas({
     };
 
     let iterations = 0;
-    while (openSet.length > 0 && iterations < 800) {
+    while (openSet.length > 0 && iterations < 2000) {
       iterations++;
       openSet.sort((a, b) => a.f - b.f);
       const current = openSet.shift();
@@ -279,6 +278,14 @@ export default function PcbCanvas({
         while (curr !== null) {
           path.unshift(curr);
           curr = curr.parent;
+        }
+        
+        // Exact pin snapping overrides
+        if (path.length > 1) {
+          path[0].x = physStartX;
+          path[0].y = physStartY;
+          path[path.length - 1].x = physEndX;
+          path[path.length - 1].y = physEndY;
         }
         return path;
       }
@@ -318,18 +325,18 @@ export default function PcbCanvas({
 
     // Direct line fallback if routing blocked
     return [
-      { x: startX, y: startY, layer: 'top' },
-      { x: endX, y: endY, layer: 'top' }
+      { x: physStartX, y: physStartY, layer: 'top' },
+      { x: physEndX, y: physEndY, layer: 'top' }
     ];
   };
 
-  const runAutorouter = () => {
+  const triggerRouting = (currentComps = components) => {
     console.log("[PCB Autorouter] Running Multi-Layer Maze search...");
     const newTraces = [];
 
     parsedTraces.forEach(net => {
-      const compFrom = components.find(c => c.id === net.from.componentId);
-      const compTo = components.find(c => c.id === net.to.componentId);
+      const compFrom = currentComps.find(c => c.id === net.from.componentId);
+      const compTo = currentComps.find(c => c.id === net.to.componentId);
       if (!compFrom || !compTo) return;
 
       const pinFrom = compFrom.pins.find(p => p.name === net.from.pin);
@@ -341,7 +348,12 @@ export default function PcbCanvas({
       const endX = snapToGrid(compTo.x + pinTo.x);
       const endY = snapToGrid(compTo.y + pinTo.y);
 
-      const path = findAStarPath(startX, startY, endX, endY, net.id, newTraces);
+      const physStartX = compFrom.x + pinFrom.x;
+      const physStartY = compFrom.y + pinFrom.y;
+      const physEndX = compTo.x + pinTo.x;
+      const physEndY = compTo.y + pinTo.y;
+
+      const path = findAStarPath(startX, startY, endX, endY, net.id, newTraces, physStartX, physStartY, physEndX, physEndY);
       if (path && path.length > 1) {
         let currentPoints = [path[0]];
         let currentLayer = path[0].layer;
@@ -374,6 +386,67 @@ export default function PcbCanvas({
     });
 
     setCustomPcbTraces(newTraces);
+  };
+
+  const runAutorouter = () => {
+    triggerRouting(components);
+  };
+
+  const runAutopositioner = () => {
+    console.log("[PCB Autopositioner] Arranging components...");
+    const powerComps = [];
+    const mainComps = [];
+    const passiveComps = [];
+    
+    components.forEach(c => {
+      if (c.type === 'battery' || c.type === 'power_source' || c.libraryId?.includes('power') || c.libraryId?.includes('outlet') || c.libraryId?.includes('adapter')) {
+        powerComps.push(c);
+      } else if (c.type === 'mcu' || c.type === 'gate' || c.type === 'relay') {
+        mainComps.push(c);
+      } else {
+        passiveComps.push(c);
+      }
+    });
+
+    const startY = 120;
+    const spacingY = 190;
+
+    const positionedComponents = components.map(c => {
+      let x = c.x;
+      let y = c.y;
+
+      if (powerComps.some(pc => pc.id === c.id)) {
+        const idx = powerComps.findIndex(pc => pc.id === c.id);
+        x = 135;
+        y = startY + idx * spacingY;
+      } else if (mainComps.some(mc => mc.id === c.id)) {
+        const idx = mainComps.findIndex(mc => mc.id === c.id);
+        x = 450;
+        y = startY + idx * (spacingY + 110);
+      } else {
+        const idx = passiveComps.findIndex(pc => pc.id === c.id);
+        const cols = 2;
+        const colIdx = idx % cols;
+        const rowIdx = Math.floor(idx / cols);
+        x = 750 + colIdx * 150;
+        y = startY + rowIdx * 125;
+      }
+
+      const compW = c.width || 60;
+      const compH = c.height || 60;
+      x = Math.max(30, Math.min(1000 - compW - 30, x));
+      y = Math.max(30, Math.min(700 - compH - 30, y));
+
+      x = Math.round(x / gridSize) * gridSize;
+      y = Math.round(y / gridSize) * gridSize;
+
+      return { ...c, x, y };
+    });
+
+    setComponents(positionedComponents);
+
+    // Run layout routing immediately using the newly calculated component layout
+    triggerRouting(positionedComponents);
   };
 
 
@@ -1074,11 +1147,11 @@ export default function PcbCanvas({
         <span className="h-4 w-px bg-slate-700"></span>
         
         <button
-          onClick={runAutorouter}
+          onClick={runAutopositioner}
           className="text-indigo-400 hover:text-indigo-300 text-[10px] font-bold transition flex items-center cursor-pointer animate-pulse"
-          title="Automatically route all nets on Top/Bottom copper layers"
+          title="Auto-position components on the PCB and route copper tracks"
         >
-          ⚡ Run Autorouter
+          ⚡ Auto-Position & Route
         </button>
       </div>
 

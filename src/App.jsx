@@ -7,6 +7,12 @@ import SidebarAiChat, { SparkyIcon } from './components/SidebarAiChat';
 import SidebarJlcpcb from './components/SidebarJlcpcb';
 import { Cpu, Layers, GitFork, Download, Sparkles, Sliders, ExternalLink, RefreshCw, X, ArrowLeft, ArrowRight, Eye, EyeOff, Ruler, ShoppingCart } from 'lucide-react';
 import { sqliteDb } from './utils/sqliteDb';
+import { runSimulationTick } from './utils/electricalSimulation';
+import { getBaseVoltage, getBaseCapacityOrPower, calculateCustomizerSize, getUpdatedCustomizerPins, getUpdatedCustomizerShapes } from './utils/batteryCustomizer';
+import { sendToRouter } from './utils/openRouter';
+import { projectDb } from './utils/projectDb';
+import { DocsDashboard } from './components/DocsDashboard';
+
 
 const INITIAL_COMPONENTS = [
   {
@@ -275,9 +281,68 @@ export default function App() {
     measurements: true
   });
 
+  const [currentDocId, setCurrentDocId] = useState(() => {
+    const path = window.location.pathname;
+    return path.startsWith('/doc/') ? path.substring(5) : '';
+  });
+  const [docName, setDocName] = useState('Untitled Project');
+  const lastLoadedDocRef = useRef(null);
+  const allowSaveRef = useRef(false);
+
+  // Reset allowSaveRef on doc transition and enable it after a 1000ms debounce
+  useEffect(() => {
+    allowSaveRef.current = false;
+    if (!currentDocId) return;
+
+    const timer = setTimeout(() => {
+      allowSaveRef.current = true;
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [currentDocId]);
+
+  const navigateToDoc = (docId) => {
+    setCurrentDocId(docId);
+    const newUrl = docId ? `/doc/${docId}` : '/';
+    window.history.pushState({}, '', newUrl);
+  };
+
   // Tour properties
   const [activeTour, setActiveTour] = useState(null); 
   const [cameraTarget, setCameraTarget] = useState(null); 
+
+  // Simulation states
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simulationSpeed, setSimulationSpeed] = useState(1);
+  const [probeActive, setProbeActive] = useState(false);
+  const [traceCurrents, setTraceCurrents] = useState({});
+
+  useEffect(() => {
+    const handleToggleProbe = () => {
+      setProbeActive(prev => !prev);
+    };
+    const handleToggleSim = () => {
+      setIsSimulating(prev => !prev);
+    };
+    const handleResetSim = () => {
+      setComponents(prev => prev.map(c => ({
+        ...c,
+        health: 100,
+        isFried: false,
+        chargePct: 1.0
+      })));
+    };
+    
+    window.addEventListener('toggle-multimeter-probe', handleToggleProbe);
+    window.addEventListener('toggle-simulation', handleToggleSim);
+    window.addEventListener('reset-simulation', handleResetSim);
+    
+    return () => {
+      window.removeEventListener('toggle-multimeter-probe', handleToggleProbe);
+      window.removeEventListener('toggle-simulation', handleToggleSim);
+      window.removeEventListener('reset-simulation', handleResetSim);
+    };
+  }, []);
 
   // Mouse drag handles for resizable sidebar
   const startResize = (e) => {
@@ -310,73 +375,306 @@ export default function App() {
     return comps.map(comp => {
       // Find matching preset ONLY by libraryId or exact value (never match generic labels like 'Resistor')
       const preset = sqliteDb.tables.library.find(libItem => 
-        (comp.libraryId && libItem.id === comp.libraryId) ||
+        (comp.libraryId && (
+          libItem.id === comp.libraryId ||
+          libItem.id.toLowerCase().includes(comp.libraryId.toLowerCase()) ||
+          comp.libraryId.toLowerCase().includes(libItem.id.toLowerCase())
+        )) ||
         (!comp.libraryId && libItem.value && comp.value && libItem.value.toLowerCase() === comp.value.toLowerCase())
       );
+      
+      const compX = (comp.x !== undefined && comp.x !== null && !isNaN(comp.x)) ? comp.x : 100;
+      const compY = (comp.y !== undefined && comp.y !== null && !isNaN(comp.y)) ? comp.y : 100;
+
       if (preset) {
+        let finalWidth = preset.width;
+        let finalHeight = preset.height;
+        let finalPins = preset.pins;
+        let finalShapes = preset.customShapes || [];
+
+        const isCustomizable = preset.type === 'battery' || 
+          preset.id === 'power_adapter_12v' || 
+          preset.id === 'buck_boost_mini' || 
+          preset.id === 'buck_converter_mini' || 
+          preset.id === 'boost_converter_mini' || 
+          preset.id === 'capacitor_electrolytic' || 
+          preset.id === 'diode_1n4007' || 
+          preset.id === 'diode_schottky' || 
+          preset.id === 'diode_zener' || 
+          preset.id === 'potentiometer_10k' || 
+          preset.id === 'photoresistor_ldr' || 
+          preset.id === 'thermistor_ntc' ||
+          preset.id === 'switch_spst';
+        if (isCustomizable) {
+          const v = comp.voltageV !== undefined ? comp.voltageV : getBaseVoltage(preset.id);
+          
+          let capOrPower;
+          const isWattage = preset.id === 'power_adapter_12v' || preset.id === 'buck_boost_mini' || preset.id === 'buck_converter_mini' || preset.id === 'boost_converter_mini' || preset.id === 'potentiometer_10k' || preset.id === 'photoresistor_ldr' || preset.id === 'thermistor_ntc' || preset.id === 'capacitor_electrolytic' || preset.id === 'diode_1n4007' || preset.id === 'diode_schottky' || preset.id === 'diode_zener' || preset.id === 'switch_spst';
+          if (isWattage) {
+            capOrPower = comp.powerW !== undefined ? comp.powerW : getBaseCapacityOrPower(preset.id);
+          } else {
+            capOrPower = comp.capacityAh !== undefined ? comp.capacityAh : getBaseCapacityOrPower(preset.id);
+          }
+
+          const { width: newWidth, height: newHeight } = calculateCustomizerSize(preset.id, v, capOrPower);
+          finalWidth = newWidth;
+          finalHeight = newHeight;
+          finalPins = getUpdatedCustomizerPins(preset.id, newWidth, newHeight, preset.pins);
+          
+          const extra = {
+            wiperPct: comp.wiperPct !== undefined ? comp.wiperPct : 50,
+            lux: comp.lux !== undefined ? comp.lux : 500,
+            temperatureC: comp.temperatureC !== undefined ? comp.temperatureC : 25,
+            closed: comp.closed !== undefined ? comp.closed : true
+          };
+          finalShapes = getUpdatedCustomizerShapes(preset.id, newWidth, newHeight, v, capOrPower, extra);
+        }
+
         return {
           ...comp,
+          x: compX,
+          y: compY,
           libraryId: preset.id,
-          width: preset.width,
-          height: preset.height,
-          pins: preset.pins,
-          customShapes: preset.customShapes || [],
+          width: finalWidth,
+          height: finalHeight,
+          pins: finalPins,
+          customShapes: finalShapes,
           manufacturer: preset.manufacturer || comp.manufacturer,
           partNumber: preset.partNumber || comp.partNumber,
           cost: preset.cost || comp.cost,
           datasheet: preset.datasheet || comp.datasheet
         };
       }
-      return comp;
+      
+      return {
+        ...comp,
+        x: compX,
+        y: compY
+      };
     });
   };
 
-  // Load state from SQLite database
+  // Real-time Physics Simulation Loop
   useEffect(() => {
-    const parsed = sqliteDb.getSession();
-    if (parsed) {
-      let loadedComps = parsed.components || [];
-      loadedComps = syncComponentsWithLibrary(loadedComps);
-      setComponents(loadedComps);
-      setTraces(parsed.traces || []);
-      setCustomPcbPads(parsed.customPcbPads || []);
-      setCustomPcbTraces(parsed.customPcbTraces || []);
-      setCustomTexts(parsed.customTexts || []);
-      setCustomShapes(parsed.customShapes || []);
-      if (parsed.gridSize) setGridSize(parsed.gridSize);
-    } else {
-      loadDefaultPreset();
-    }
-  }, []);
+    if (!isSimulating) return;
 
-  // Listen for database changes to dynamically sync all placed components live
-  useEffect(() => {
-    const handleDbUpdate = () => {
-      setComponents(prev => {
-        const synced = syncComponentsWithLibrary(prev);
-        if (JSON.stringify(synced) !== JSON.stringify(prev)) {
-          return synced;
-        }
-        return prev;
+    const interval = setInterval(() => {
+      setComponents(prevComps => {
+        const res = runSimulationTick(prevComps, traces, 0.1 * simulationSpeed);
+        setTraceCurrents(res.traceCurrents);
+        return res.components;
       });
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [isSimulating, simulationSpeed, traces]);
+
+  // Live Static Simulation pass to compute VCC/GND net types instantly on component/trace changes
+  useEffect(() => {
+    const res = runSimulationTick(components, traces, 0);
+    setTraceCurrents(res.traceCurrents);
+  }, [components, traces]);
+
+  // Listen for popstate event to synchronize currentDocId state when browser back/forward buttons are pressed
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname;
+      setCurrentDocId(path.startsWith('/doc/') ? path.substring(5) : '');
     };
-    window.addEventListener('wiretracks_sqlite_db_update', handleDbUpdate);
-    return () => window.removeEventListener('wiretracks_sqlite_db_update', handleDbUpdate);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Save changes to SQLite database
+  // Load project from IndexedDB when currentDocId shifts
   useEffect(() => {
-    if (components.length === 0 && customPcbPads.length === 0) return;
-    sqliteDb.setSession({
-      components,
-      traces,
-      customPcbPads,
-      customPcbTraces,
-      customTexts,
-      customShapes,
-      gridSize
-    });
-  }, [components, traces, customPcbPads, customPcbTraces, customTexts, customShapes, gridSize]);
+    const loadDoc = async () => {
+      try {
+        // Bootstrap standard demo documents on first run if IndexedDB is empty
+        const all = await projectDb.getAll();
+        if (all.length === 0) {
+          const doc1 = {
+            id: 'doc_led_driver',
+            name: 'LED Driver Blinker Demo',
+            components: INITIAL_COMPONENTS,
+            traces: INITIAL_TRACES,
+            customPcbPads: [],
+            customPcbTraces: [],
+            customTexts: [],
+            customShapes: [],
+            gridSize: 15,
+            lastModified: Date.now() - 60000
+          };
+          const doc2 = {
+            id: 'doc_lm7805_regulator',
+            name: 'LM7805 Regulator Circuit',
+            components: [
+              {
+                id: 'U1',
+                name: 'U1',
+                type: 'regulator',
+                label: 'Linear Regulator',
+                value: 'LM7805 (5V)',
+                x: 240,
+                y: 180,
+                width: 90,
+                height: 60,
+                pins: [
+                  { name: 'IN', x: 0, y: 15, dir: 'left' },
+                  { name: 'GND', x: 45, y: 60, dir: 'down' },
+                  { name: 'OUT', x: 90, y: 15, dir: 'right' }
+                ],
+                manufacturer: 'Texas Instruments',
+                partNumber: 'LM7805ACT',
+                cost: '$0.62',
+                datasheet: '#',
+                groupId: null
+              },
+              {
+                id: 'C1',
+                name: 'C1',
+                type: 'capacitor',
+                label: 'C_IN',
+                value: '0.33µF',
+                x: 120,
+                y: 180,
+                width: 30,
+                height: 45,
+                pins: [
+                  { name: '1', x: 15, y: 0, dir: 'up' },
+                  { name: '2', x: 15, y: 45, dir: 'down' }
+                ],
+                manufacturer: 'Murata Electronics',
+                partNumber: 'GRM21BR71H104KA01L',
+                cost: '$0.024',
+                datasheet: '#',
+                groupId: null
+              },
+              {
+                id: 'C2',
+                name: 'C2',
+                type: 'capacitor',
+                label: 'C_OUT',
+                value: '0.1µF',
+                x: 390,
+                y: 180,
+                width: 30,
+                height: 45,
+                pins: [
+                  { name: '1', x: 15, y: 0, dir: 'up' },
+                  { name: '2', x: 15, y: 45, dir: 'down' }
+                ],
+                manufacturer: 'KEMET',
+                partNumber: 'T491A334K035AT',
+                cost: '$0.28',
+                datasheet: '#',
+                groupId: null
+              }
+            ],
+            traces: [
+              { id: 'trace_c1_vin', from: 'C1.1', to: 'U1.IN', isLocked: false, path: [] },
+              { id: 'trace_c2_vout', from: 'C2.1', to: 'U1.OUT', isLocked: false, path: [] }
+            ],
+            customPcbPads: [],
+            customPcbTraces: [],
+            customTexts: [],
+            customShapes: [],
+            gridSize: 15,
+            lastModified: Date.now() - 120000
+          };
+          await projectDb.save(doc1);
+          await projectDb.save(doc2);
+        }
+
+        if (!currentDocId) {
+          lastLoadedDocRef.current = null;
+          return;
+        }
+
+        const doc = await projectDb.get(currentDocId);
+        if (doc) {
+          let loadedComps = doc.components || [];
+          loadedComps = syncComponentsWithLibrary(loadedComps);
+          setComponents(loadedComps);
+          setTraces(doc.traces || []);
+          setCustomPcbPads(doc.customPcbPads || []);
+          setCustomPcbTraces(doc.customPcbTraces || []);
+          setCustomTexts(doc.customTexts || []);
+          setCustomShapes(doc.customShapes || []);
+          setDocName(doc.name || 'Untitled Project');
+          if (doc.gridSize) setGridSize(doc.gridSize);
+          
+          // Cache the document snapshot to prevent initial state updates from triggering autosave
+          lastLoadedDocRef.current = {
+            id: currentDocId,
+            name: doc.name || 'Untitled Project',
+            components: loadedComps,
+            traces: doc.traces || [],
+            customPcbPads: doc.customPcbPads || [],
+            customPcbTraces: doc.customPcbTraces || [],
+            customTexts: doc.customTexts || [],
+            customShapes: doc.customShapes || [],
+            gridSize: doc.gridSize || 15
+          };
+        } else {
+          // Document not found in DB. Drop back to dashboard.
+          navigateToDoc('');
+        }
+      } catch (err) {
+        console.error('Failed to load document from IndexedDB:', err);
+      }
+    };
+    loadDoc();
+  }, [currentDocId]);
+
+  // Autosave project changes back to IndexedDB
+  useEffect(() => {
+    // Only save if the active document has finished loading and the debounce delay has passed
+    if (!currentDocId || !allowSaveRef.current || !lastLoadedDocRef.current || lastLoadedDocRef.current.id !== currentDocId) {
+      return;
+    }
+
+    // Prevent saving if local state matches the loaded DB record
+    const isSame = lastLoadedDocRef.current.name === docName &&
+      JSON.stringify(lastLoadedDocRef.current.components) === JSON.stringify(components) &&
+      JSON.stringify(lastLoadedDocRef.current.traces) === JSON.stringify(traces) &&
+      JSON.stringify(lastLoadedDocRef.current.customPcbPads) === JSON.stringify(customPcbPads) &&
+      JSON.stringify(lastLoadedDocRef.current.customPcbTraces) === JSON.stringify(customPcbTraces) &&
+      JSON.stringify(lastLoadedDocRef.current.customTexts) === JSON.stringify(customTexts) &&
+      JSON.stringify(lastLoadedDocRef.current.customShapes) === JSON.stringify(customShapes) &&
+      lastLoadedDocRef.current.gridSize === gridSize;
+
+    if (isSame) return;
+
+    const saveDoc = async () => {
+      try {
+        const payload = {
+          id: currentDocId,
+          name: docName,
+          components,
+          traces,
+          customPcbPads,
+          customPcbTraces,
+          customTexts,
+          customShapes,
+          gridSize
+        };
+        await projectDb.save(payload);
+        lastLoadedDocRef.current = JSON.parse(JSON.stringify(payload));
+      } catch (err) {
+        console.error('Autosave to IndexedDB failed:', err);
+      }
+    };
+    saveDoc();
+  }, [currentDocId, docName, components, traces, customPcbPads, customPcbTraces, customTexts, customShapes, gridSize]);
+
+  // Expose components and traces to window for Puppeteer debugging
+  useEffect(() => {
+    window.__components = components;
+    window.__traces = traces;
+    window.__sendToRouter = sendToRouter;
+    window.calculateCustomizerSize = calculateCustomizerSize;
+    window.sqliteDb = sqliteDb;
+  }, [components, traces]);
 
   // Center camera target step during tour navigation
   useEffect(() => {
@@ -533,25 +831,45 @@ export default function App() {
     setExportDropdownOpen(false);
   };
 
+  if (!currentDocId) {
+    return <DocsDashboard onSelectProject={navigateToDoc} />;
+  }
+
   return (
     <div className="h-screen w-screen flex flex-col bg-slate-900 font-sans overflow-hidden">
       {/* TOP HEADER */}
-      <header className="h-14 bg-white border-b border-slate-200 flex items-center justify-between px-5 select-none z-20 shrink-0 shadow-xs">
-        {/* Gold & Yellow parallel trace logo */}
-        <div className="flex items-center space-x-2 select-none group cursor-pointer">
-          <svg viewBox="0 0 24 24" className="w-6 h-6 fill-none transition-transform duration-200 group-hover:scale-105" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M3 6h5l4 6h6v4h3" stroke="#d97706" strokeWidth="2.5" />
-            <path d="M3 10h5l4 6h6v4h3" stroke="#fbbf24" strokeWidth="1.8" />
-            <circle cx="3" cy="6" r="1.2" fill="#d97706" />
-            <circle cx="3" cy="10" r="1.2" fill="#fbbf24" />
-            <circle cx="21" cy="16" r="1.2" fill="#d97706" />
-            <circle cx="21" cy="20" r="1.2" fill="#fbbf24" />
-          </svg>
-          <h1 className="text-xl font-extrabold tracking-tight text-slate-900 leading-none lowercase">wiretracks</h1>
+      <header className="h-14 bg-white border-b border-slate-100 flex items-center justify-between px-5 select-none z-20 shrink-0 shadow-xs">
+        {/* Back to Home Button & Editable Document Title */}
+        <div className="flex items-center space-x-3.5">
+          <div 
+            onClick={() => navigateToDoc('')}
+            className="flex items-center space-x-2 select-none group cursor-pointer"
+            title="Back to Documents Hub"
+          >
+            <svg viewBox="0 0 24 24" className="w-6 h-6 fill-none transition-transform duration-200 group-hover:scale-105" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 6h5l4 6h6v4h3" stroke="#d97706" strokeWidth="2.5" />
+              <path d="M3 10h5l4 6h6v4h3" stroke="#fbbf24" strokeWidth="1.8" />
+              <circle cx="3" cy="6" r="1.2" fill="#d97706" />
+              <circle cx="3" cy="10" r="1.2" fill="#fbbf24" />
+              <circle cx="21" cy="16" r="1.2" fill="#d97706" />
+              <circle cx="21" cy="20" r="1.2" fill="#fbbf24" />
+            </svg>
+            <h1 className="text-xl font-extrabold tracking-tight text-slate-900 leading-none lowercase">wiretracks</h1>
+          </div>
+
+          <div className="h-4 w-[1px] bg-slate-200" />
+
+          <input
+            type="text"
+            value={docName}
+            onChange={(e) => setDocName(e.target.value)}
+            className="text-xs font-bold text-slate-800 bg-transparent border border-transparent hover:border-slate-100 hover:bg-slate-50 focus:bg-white focus:border-indigo-500 rounded px-2.5 py-1.5 outline-none transition focus:ring-1 focus:ring-indigo-500 w-48 leading-none"
+            title="Click to rename schematic project"
+          />
         </div>
 
         {/* View Selection Tabs */}
-        <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-200">
+        <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-100/60">
           <button
             onClick={() => { setActiveView('schematic'); setSelectedComponentId(null); setSelectedTraceId(null); }}
             className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center transition ${activeView === 'schematic' ? 'bg-white text-slate-800 shadow-xs' : 'text-slate-500 hover:text-slate-800'}`}
@@ -576,7 +894,7 @@ export default function App() {
         <div className="flex items-center space-x-2 relative">
           <button
             onClick={loadDefaultPreset}
-            className="p-1.5 hover:bg-slate-100 border border-slate-200 text-slate-500 rounded-lg transition"
+            className="p-1.5 hover:bg-slate-100 border border-slate-100/60 text-slate-500 rounded-lg transition"
             title="Load Default Preset Blinker"
           >
             <RefreshCw size={13} />
@@ -590,7 +908,7 @@ export default function App() {
           </button>
           
           {exportDropdownOpen && (
-            <div className="absolute top-10 right-0 w-52 bg-white rounded-lg border border-slate-200 shadow-lg py-1 z-30 text-left font-sans text-xs">
+            <div className="absolute top-10 right-0 w-52 bg-white rounded-lg border border-slate-100 shadow-lg py-1 z-30 text-left font-sans text-xs">
               <button
                 onClick={handleExportSvg}
                 className="w-full px-4 py-2 hover:bg-slate-50 text-slate-700 flex flex-col font-medium border-b border-slate-100"
@@ -625,29 +943,106 @@ export default function App() {
         <main className="flex-1 h-full relative overflow-hidden bg-slate-900 border-r border-slate-800">
           
           {activeView === 'schematic' && (
-            <SchematicCanvas
-              components={components}
-              setComponents={setComponents}
-              traces={traces}
-              setTraces={setTraces}
-              customTexts={customTexts}
-              setCustomTexts={setCustomTexts}
-              customShapes={customShapes}
-              setCustomShapes={setCustomShapes}
-              selectedComponentId={selectedComponentId}
-              setSelectedComponentId={setSelectedComponentId}
-              selectedTraceId={selectedTraceId}
-              setSelectedTraceId={setSelectedTraceId}
-              cameraTarget={cameraTarget}
-              setCameraTarget={setCameraTarget}
-              gridSize={gridSize}
-              layersVisibility={layersVisibility}
-            />
+            <>
+              <SchematicCanvas
+                components={components}
+                setComponents={setComponents}
+                traces={traces}
+                setTraces={setTraces}
+                customTexts={customTexts}
+                setCustomTexts={setCustomTexts}
+                customShapes={customShapes}
+                setCustomShapes={setCustomShapes}
+                selectedComponentId={selectedComponentId}
+                setSelectedComponentId={setSelectedComponentId}
+                selectedTraceId={selectedTraceId}
+                setSelectedTraceId={setSelectedTraceId}
+                cameraTarget={cameraTarget}
+                setCameraTarget={setCameraTarget}
+                gridSize={gridSize}
+                layersVisibility={layersVisibility}
+                traceCurrents={traceCurrents}
+                probeActive={probeActive}
+              />
+
+              {/* Floating Simulation HUD controller */}
+              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-30 bg-slate-900/95 border border-slate-800 text-white rounded-xl shadow-2xl p-2.5 flex items-center space-x-4 backdrop-blur-md">
+                <div className="flex items-center space-x-1.5 border-r border-slate-800 pr-3">
+                  <button
+                    onClick={() => setIsSimulating(!isSimulating)}
+                    className={`p-2 rounded-lg cursor-pointer transition flex items-center space-x-1 ${
+                      isSimulating 
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white font-bold' 
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                    }`}
+                    title={isSimulating ? "Pause Physics Simulation" : "Start Physics Simulation"}
+                  >
+                    {isSimulating ? (
+                      <>
+                        <span className="relative flex h-2 w-2 mr-1">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                        </span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider">RUNNING</span>
+                      </>
+                    ) : (
+                      <span className="text-[10px] font-bold uppercase tracking-wider">SIMULATE</span>
+                    )}
+                  </button>
+                  
+                  <button
+                    onClick={() => {
+                      setIsSimulating(false);
+                      setComponents(prev => prev.map(c => ({
+                        ...c,
+                        health: 100,
+                        isFried: false,
+                        chargePct: 1.0,
+                        capacityRemainingAh: c.capacityAh
+                      })));
+                      setTraceCurrents({});
+                    }}
+                    className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white cursor-pointer transition text-[10px] font-bold uppercase tracking-wider"
+                    title="Reset Simulation States"
+                  >
+                    RESET
+                  </button>
+                </div>
+
+                <div className="flex items-center space-x-2 border-r border-slate-800 pr-3 text-[10px] text-slate-400">
+                  <span className="font-semibold uppercase tracking-wider">SPEED:</span>
+                  <select
+                    value={simulationSpeed}
+                    onChange={(e) => setSimulationSpeed(parseFloat(e.target.value))}
+                    className="bg-slate-800 border border-slate-700 text-white rounded px-1.5 py-0.5 font-mono text-[10px] focus:outline-none"
+                  >
+                    <option value="1">1.0x (Realtime)</option>
+                    <option value="2.5">2.5x (Accelerated)</option>
+                    <option value="5">5.0x (Fast)</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center space-x-1.5 text-[10px] text-slate-400">
+                  <button
+                    onClick={() => setProbeActive(!probeActive)}
+                    className={`p-2 rounded-lg cursor-pointer transition flex items-center space-x-1.5 font-bold uppercase tracking-wider ${
+                      probeActive
+                        ? 'bg-amber-500 text-slate-950 font-bold border border-amber-400'
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                    }`}
+                    title="Volt-meter Probe Tool: Hover pins and traces to read values"
+                  >
+                    <span>⚡ MULTIMETER PROBE</span>
+                  </button>
+                </div>
+              </div>
+            </>
           )}
 
           {activeView === 'breadboard' && (
             <BreadboardCanvas
               components={components}
+              setComponents={setComponents}
               traces={traces}
             />
           )}
@@ -687,8 +1082,8 @@ export default function App() {
 
           {/* Photoshop-style Layers Visibility Manager */}
           {layersPanelOpen ? (
-            <div className="absolute right-3 top-3 z-10 glass-panel bg-white/95 border border-slate-200/90 rounded-xl shadow-md w-52 overflow-hidden flex flex-col font-sans select-none text-[11px]">
-              <div className="bg-slate-50 border-b border-slate-200 px-3 py-2 flex items-center justify-between font-bold text-slate-700">
+            <div className="absolute right-3 top-3 z-10 bg-white/95 border border-slate-100/60 rounded-xl shadow-md w-52 overflow-hidden flex flex-col font-sans select-none text-[11px]">
+              <div className="bg-slate-50 border-b border-slate-100 px-3 py-2 flex items-center justify-between font-bold text-slate-700">
                 <span className="flex items-center"><Layers size={13} className="mr-1.5 text-blue-500" /> CAD Layer Manager</span>
                 <button onClick={() => setLayersPanelOpen(false)} className="text-slate-400 hover:text-slate-600">✕</button>
               </div>
@@ -715,7 +1110,7 @@ export default function App() {
                   <select
                     value={gridSize}
                     onChange={(e) => setGridSize(Number(e.target.value))}
-                    className="w-full bg-slate-100 border border-slate-200 rounded px-1.5 py-1 text-[10px] font-mono text-slate-700 outline-none"
+                    className="w-full bg-slate-100 border border-slate-100/60 rounded px-1.5 py-1 text-[10px] font-mono text-slate-700 outline-none"
                   >
                     <option value={10}>10px (Fine Grid)</option>
                     <option value={15}>15px (Standard)</option>
@@ -728,7 +1123,7 @@ export default function App() {
           ) : (
             <button
               onClick={() => setLayersPanelOpen(true)}
-              className="absolute right-3 top-3 z-10 p-2 bg-white/95 border border-slate-200 rounded-lg shadow-sm hover:bg-slate-50 transition"
+              className="absolute right-3 top-3 z-10 p-2 bg-white/95 border border-slate-100/60 rounded-lg shadow-sm hover:bg-slate-50 transition"
               title="Show Layer Manager"
             >
               <Layers size={15} className="text-slate-600" />
@@ -737,7 +1132,7 @@ export default function App() {
 
           {/* Camera layout Tour Overlay */}
           {activeTour && activeTour.steps && (
-            <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 glass-panel bg-white/95 backdrop-blur-md px-5 py-3.5 rounded-xl border border-slate-200/80 shadow-lg flex items-center space-x-6 max-w-lg min-w-[340px]">
+            <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 bg-white/95 backdrop-blur-md px-5 py-3.5 rounded-xl border border-slate-100/60 shadow-lg flex items-center space-x-6 max-w-lg min-w-[340px]">
               <div className="flex-1 text-xs">
                 <div className="flex items-center space-x-1 text-[10px] text-blue-600 font-bold uppercase tracking-wider mb-1">
                   <Eye size={12} />
@@ -751,7 +1146,7 @@ export default function App() {
                 <button
                   onClick={handleTourBack}
                   disabled={activeTour.currentStep === 0}
-                  className="p-1.5 rounded border border-slate-200 hover:bg-slate-50 transition text-slate-500 disabled:opacity-40 disabled:hover:bg-transparent"
+                  className="p-1.5 rounded border border-slate-100/60 hover:bg-slate-50 transition text-slate-500 disabled:opacity-40 disabled:hover:bg-transparent"
                   title="Previous Step"
                 >
                   <ArrowLeft size={13} />
@@ -759,7 +1154,7 @@ export default function App() {
                 <button
                   onClick={handleTourNext}
                   disabled={activeTour.currentStep === activeTour.steps.length - 1}
-                  className="p-1.5 rounded border border-slate-200 hover:bg-slate-50 transition text-slate-500 disabled:opacity-40 disabled:hover:bg-transparent"
+                  className="p-1.5 rounded border border-slate-100/60 hover:bg-slate-50 transition text-slate-500 disabled:opacity-40 disabled:hover:bg-transparent"
                   title="Next Step"
                 >
                   <ArrowRight size={13} />

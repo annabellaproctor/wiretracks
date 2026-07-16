@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { findOrthogonalPath } from '../utils/router';
-import { Lock, Unlock, Trash2, RotateCw, Settings, Search, Edit3, Navigation, Move, HelpCircle, Type, Square, Ruler, Layers } from 'lucide-react';
+import { Lock, Unlock, Trash2, RotateCw, Settings, Search, Edit3, Navigation, Move, HelpCircle, Type, Square, Ruler, Layers, Sparkles } from 'lucide-react';
 import { searchComponentImages, searchJLCPartCode } from '../utils/partsApi';
 import { sendToRouter } from '../utils/openRouter';
 
@@ -120,7 +120,9 @@ export default function SchematicCanvas({
   cameraTarget,
   setCameraTarget,
   gridSize = 15,
-  layersVisibility
+  layersVisibility,
+  traceCurrents = {},
+  probeActive = false
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -131,6 +133,19 @@ export default function SchematicCanvas({
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const animTimeRef = useRef(0);
+
+  // Undo/Redo and UI overlays states
+  const historyRef = useRef([]);
+  const redoRef = useRef([]);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [shortcutsMenuOpen, setShortcutsMenuOpen] = useState(false);
+  const [paletteSearchQuery, setPaletteSearchQuery] = useState('');
+  const [paletteSelectedIndex, setPaletteSelectedIndex] = useState(0);
+
+
+
+
 
   // Toolbelt: 'select', 'pan', 'wire', 'text', 'shape', 'ruler', 'eraser'
   const [activeTool, setActiveTool] = useState('select'); 
@@ -143,12 +158,13 @@ export default function SchematicCanvas({
 
   // States for interactive pin hover and connection info card
   const [hoveredPin, setHoveredPin] = useState(null); // { compId, pinName, compLabel, pin }
+  const [hoveredTraceId, setHoveredTraceId] = useState(null);
   const [tooltipState, setTooltipState] = useState({ visible: false, x: 0, y: 0, compLabel: '', pinName: '', connections: [] });
   const tooltipTimerRef = useRef(null);
 
 
   // macOS Slide-out Options Panel settings
-  const [wireColor, setWireColor] = useState('#2563eb'); // '#2563eb', '#dc2626', '#16a34a', '#d97706'
+  const [wireColor, setWireColor] = useState('auto'); // 'auto', '#2563eb', '#dc2626', '#0f172a', '#16a34a', '#d97706'
   const [autoPenaltyMode, setAutoPenaltyMode] = useState('high'); // 'high', 'low'
 
 
@@ -163,6 +179,53 @@ export default function SchematicCanvas({
   const [rulerEnd, setRulerEnd] = useState(null); 
 
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  // Refs for drawing synchronization
+  const componentsRef = useRef(components);
+  const tracesRef = useRef(traces);
+  const customTextsRef = useRef(customTexts);
+  const customShapesRef = useRef(customShapes);
+  const panRef = useRef(pan);
+  const zoomRef = useRef(zoom);
+  const selectedComponentIdRef = useRef(selectedComponentId);
+  const selectedTraceIdRef = useRef(selectedTraceId);
+  const drawingWireFromRef = useRef(drawingWireFrom);
+  const drawingShapeStartRef = useRef(drawingShapeStart);
+  const rulerStartRef = useRef(rulerStart);
+  const rulerEndRef = useRef(rulerEnd);
+  const mousePosRef = useRef(mousePos);
+  const dimensionsRef = useRef(dimensions);
+  const gridSizeRef = useRef(gridSize);
+  const layersVisibilityRef = useRef(layersVisibility);
+  const wireColorRef = useRef(wireColor);
+  const hoveredPinRef = useRef(hoveredPin);
+  const traceCurrentsRef = useRef(traceCurrents);
+  const probeActiveRef = useRef(probeActive);
+  const hoveredTraceIdRef = useRef(hoveredTraceId);
+
+  useEffect(() => {
+    componentsRef.current = components;
+    tracesRef.current = traces;
+    customTextsRef.current = customTexts;
+    customShapesRef.current = customShapes;
+    panRef.current = pan;
+    zoomRef.current = zoom;
+    selectedComponentIdRef.current = selectedComponentId;
+    selectedTraceIdRef.current = selectedTraceId;
+    drawingWireFromRef.current = drawingWireFrom;
+    drawingShapeStartRef.current = drawingShapeStart;
+    rulerStartRef.current = rulerStart;
+    rulerEndRef.current = rulerEnd;
+    mousePosRef.current = mousePos;
+    dimensionsRef.current = dimensions;
+    gridSizeRef.current = gridSize;
+    layersVisibilityRef.current = layersVisibility;
+    wireColorRef.current = wireColor;
+    hoveredPinRef.current = hoveredPin;
+    traceCurrentsRef.current = traceCurrents;
+    probeActiveRef.current = probeActive;
+    hoveredTraceIdRef.current = hoveredTraceId;
+  }, [components, traces, customTexts, customShapes, pan, zoom, selectedComponentId, selectedTraceId, drawingWireFrom, drawingShapeStart, rulerStart, rulerEnd, mousePos, dimensions, gridSize, layersVisibility, wireColor, hoveredPin, traceCurrents, probeActive, hoveredTraceId]);
 
   // ResizeObserver setup
   useEffect(() => {
@@ -246,40 +309,7 @@ export default function SchematicCanvas({
     return () => window.removeEventListener('mousedown', handleGlobalClick);
   }, [contextMenu]);
 
-  // Override browser trackpad horizontal sweeps, browser history shifts, and page-zooming
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
 
-    const handleWheel = (e) => {
-      e.preventDefault();
-      
-      if (e.ctrlKey) {
-        const zoomFactor = 1.08;
-        setZoom(prev => {
-          const next = e.deltaY < 0 ? prev * zoomFactor : prev / zoomFactor;
-          return Math.max(0.4, Math.min(3, next));
-        });
-      } else {
-        setPan(prev => ({
-          x: prev.x - e.deltaX,
-          y: prev.y - e.deltaY
-        }));
-      }
-    };
-
-    const handleGestureStart = (e) => e.preventDefault();
-
-    canvas.addEventListener('wheel', handleWheel, { passive: false });
-    canvas.addEventListener('gesturestart', handleGestureStart, { passive: false });
-    canvas.addEventListener('gesturechange', handleGestureStart, { passive: false });
-
-    return () => {
-      canvas.removeEventListener('wheel', handleWheel);
-      canvas.removeEventListener('gesturestart', handleGestureStart);
-      canvas.removeEventListener('gesturechange', handleGestureStart);
-    };
-  }, []);
 
   const screenToWorld = (clientX, clientY) => {
     const canvas = canvasRef.current;
@@ -292,6 +322,54 @@ export default function SchematicCanvas({
 
   const snapToGrid = (val) => {
     return Math.round(val / gridSize) * gridSize;
+  };
+
+  const runSchematicAutopositioner = () => {
+    const powerComps = [];
+    const mainComps = [];
+    const passiveComps = [];
+    
+    components.forEach(c => {
+      if (c.type === 'battery' || c.type === 'power_source' || c.libraryId?.includes('power') || c.libraryId?.includes('outlet') || c.libraryId?.includes('adapter')) {
+        powerComps.push(c);
+      } else if (c.type === 'mcu' || c.type === 'gate' || c.type === 'relay') {
+        mainComps.push(c);
+      } else {
+        passiveComps.push(c);
+      }
+    });
+
+    const startY = 100;
+    const spacingY = 150;
+
+    const newComponents = components.map(c => {
+      let x = c.x;
+      let y = c.y;
+
+      if (powerComps.some(pc => pc.id === c.id)) {
+        const idx = powerComps.findIndex(pc => pc.id === c.id);
+        x = 90;
+        y = startY + idx * spacingY;
+      } else if (mainComps.some(mc => mc.id === c.id)) {
+        const idx = mainComps.findIndex(mc => mc.id === c.id);
+        x = 285;
+        y = startY + idx * (spacingY + 120);
+      } else {
+        const idx = passiveComps.findIndex(pc => pc.id === c.id);
+        const cols = 2;
+        const colIdx = idx % cols;
+        const rowIdx = Math.floor(idx / cols);
+        x = 480 + colIdx * 150;
+        y = startY + rowIdx * 105;
+      }
+
+      x = Math.round(x / gridSize) * gridSize;
+      y = Math.round(y / gridSize) * gridSize;
+
+      return { ...c, x, y };
+    });
+
+    setComponents(newComponents);
   };
 
   const recalculateAllRoutes = (currentComps = components, currentTraces = traces) => {
@@ -313,8 +391,8 @@ export default function SchematicCanvas({
       const [startCompId, startPinName] = trace.from.split('.');
       const [endCompId, endPinName] = trace.to.split('.');
 
-      const startComp = currentComps.find(c => c.id === startCompId || c.name === startCompId);
-      const endComp = currentComps.find(c => c.id === endCompId || c.name === endCompId);
+      const startComp = currentComps.find(c => c.id === startCompId || c.name === startCompId || c.label === startCompId);
+      const endComp = currentComps.find(c => c.id === endCompId || c.name === endCompId || c.label === endCompId);
 
       if (!startComp || !endComp) return;
 
@@ -332,12 +410,16 @@ export default function SchematicCanvas({
         y: endComp.y + endPin.y
       };
 
-      const path = findOrthogonalPath(
+       const path = findOrthogonalPath(
         startPos, 
         endPos, 
         currentComps, 
         updatedTraces,
-        gridSize
+        gridSize,
+        startComp.id,
+        endComp.id,
+        startPin.dir,
+        endPin.dir
       );
 
       updatedTraces.push({
@@ -346,21 +428,67 @@ export default function SchematicCanvas({
       });
     });
 
-    setTraces(updatedTraces);
+    const pathsChanged = JSON.stringify(updatedTraces.map(t => ({ id: t.id, path: t.path }))) !==
+                         JSON.stringify(currentTraces.map(t => ({ id: t.id, path: t.path })));
+    if (pathsChanged) {
+      setTraces(updatedTraces);
+    }
   };
 
+  // Keep track of previous components to detect movement
+  const prevCompsRef = useRef(components);
+  const hasRoutedOnMount = useRef(false);
+  const lastCompsRef = useRef(components);
+
+  if (lastCompsRef.current !== components) {
+    hasRoutedOnMount.current = false;
+    lastCompsRef.current = components;
+  }
+
   useEffect(() => {
-    if (components.length > 0) {
+    const compsChanged = JSON.stringify(components.map(c => ({ id: c.id, x: c.x, y: c.y, pins: c.pins }))) !== 
+                         JSON.stringify(prevCompsRef.current.map(c => ({ id: c.id, x: c.x, y: c.y, pins: c.pins })));
+    const needsRouting = traces.some(t => !t.isLocked && (!t.path || t.path.length === 0));
+    const hasActivePaths = traces.some(t => t.path && t.path.length > 0);
+    const forceMountRouting = !hasRoutedOnMount.current && components.length > 0;
+
+    if (compsChanged || needsRouting || forceMountRouting || (components.length === 0 && hasActivePaths)) {
       recalculateAllRoutes();
+      prevCompsRef.current = components;
+      if (components.length > 0) {
+        hasRoutedOnMount.current = true;
+      }
     }
-  }, [components, gridSize]);
+  }, [components, traces, gridSize]);
 
   // Main Drawing Loop
-  useEffect(() => {
+  const drawCanvas = (animTime) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
+
+    const components = componentsRef.current;
+    const traces = tracesRef.current;
+    const customTexts = customTextsRef.current;
+    const customShapes = customShapesRef.current;
+    const pan = panRef.current;
+    const zoom = zoomRef.current;
+    const selectedComponentId = selectedComponentIdRef.current;
+    const selectedTraceId = selectedTraceIdRef.current;
+    const drawingWireFrom = drawingWireFromRef.current;
+    const drawingShapeStart = drawingShapeStartRef.current;
+    const rulerStart = rulerStartRef.current;
+    const rulerEnd = rulerEndRef.current;
+    const mousePos = mousePosRef.current;
+    const dimensions = dimensionsRef.current;
+    const gridSize = gridSizeRef.current;
+    const layersVisibility = layersVisibilityRef.current;
+    const wireColor = wireColorRef.current;
+    const hoveredPin = hoveredPinRef.current;
+    const traceCurrents = traceCurrentsRef.current;
+    const probeActive = probeActiveRef.current;
+    const hoveredTraceId = hoveredTraceIdRef.current;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -449,50 +577,46 @@ export default function SchematicCanvas({
       }
     }
 
-    // 3. Draw electrical traces
-    traces.forEach((trace) => {
-      const isSelected = trace.id === selectedTraceId;
-      const isVisible = trace.isLocked ? layersVisibility.lockedTraces : layersVisibility.traces;
-      if (!isVisible || !trace.path || trace.path.length < 2) return;
 
-      ctx.lineWidth = trace.isLocked ? 3.5 : (isSelected ? 3 : 2);
-      
-      // Inherit custom color settings if saved
-      ctx.strokeStyle = trace.color || (trace.isLocked ? '#d97706' : (isSelected ? '#ef4444' : '#2563eb'));
-
-      ctx.beginPath();
-      ctx.moveTo(trace.path[0].x, trace.path[0].y);
-      for (let i = 1; i < trace.path.length; i++) {
-        ctx.lineTo(trace.path[i].x, trace.path[i].y);
-      }
-      ctx.stroke();
-
-      if (isSelected || trace.isLocked) {
-        ctx.fillStyle = trace.isLocked ? '#fbbf24' : '#ef4444';
-        trace.path.forEach(pt => {
-          ctx.beginPath();
-          ctx.arc(pt.x, pt.y, 3.2, 0, 2 * Math.PI);
-          ctx.fill();
-        });
-      }
-    });
-
-    // 4. Draw wire pencil preview
-    if (drawingWireFrom) {
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = wireColor;
-      ctx.setLineDash([5, 3]);
-      ctx.beginPath();
-      ctx.moveTo(drawingWireFrom.x, drawingWireFrom.y);
-      ctx.lineTo(mousePos.x, drawingWireFrom.y);
-      ctx.lineTo(mousePos.x, mousePos.y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
 
     // 5. Draw component blocks
     if (layersVisibility.components) {
       components.forEach((comp) => {
+        ctx.save();
+        
+        // Render Battery liquid fluid charge level
+        if (comp.type === 'battery' && !comp.isFried) {
+          const padding = 12;
+          const innerW = comp.width - padding * 2;
+          const innerH = comp.height - padding * 2;
+          const chargeH = innerH * (comp.chargePct !== undefined ? comp.chargePct : 1.0);
+          
+          ctx.save();
+          const pct = comp.chargePct !== undefined ? comp.chargePct : 1.0;
+          let color = '#10b981'; // Green
+          if (pct < 0.25) color = '#ef4444'; // Red
+          else if (pct < 0.6) color = '#f59e0b'; // Amber
+          
+          // Draw soft background fluid chamber
+          ctx.fillStyle = color + '15';
+          ctx.beginPath();
+          ctx.roundRect(comp.x + padding, comp.y + padding, innerW, innerH, 2);
+          ctx.fill();
+          
+          // Draw dynamic liquid charge level
+          ctx.fillStyle = color + '80';
+          ctx.beginPath();
+          ctx.roundRect(
+            comp.x + padding, 
+            comp.y + padding + (innerH - chargeH), 
+            innerW, 
+            chargeH,
+            2
+          );
+          ctx.fill();
+          ctx.restore();
+        }
+
         const isSelected = comp.id === selectedComponentId;
         
         if (isSelected) {
@@ -503,29 +627,34 @@ export default function SchematicCanvas({
           ctx.strokeRect(comp.x - 4, comp.y - 4, comp.width + 8, comp.height + 8);
         }
 
-        // Draw the premium CAD board body
-        ctx.save();
-        ctx.fillStyle = '#0f172a'; // Deep slate solder mask
-        ctx.strokeStyle = comp.groupId ? '#3b82f6' : '#1e293b'; 
-        ctx.lineWidth = comp.groupId ? 2.5 : 2;
-        ctx.beginPath();
-        ctx.roundRect(comp.x, comp.y, comp.width, comp.height, 4);
-        ctx.fill();
-        ctx.stroke();
-
-        // Draw a beautiful white silkscreen margin inside the board
-        ctx.strokeStyle = 'rgba(241, 245, 249, 0.15)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.roundRect(comp.x + 3, comp.y + 3, comp.width - 6, comp.height - 6, 2);
-        ctx.stroke();
-
-        // Draw microchip CAD graphics for MCUs / Custom chips
         let compShapes = comp.customShapes;
         if (typeof compShapes === 'string') {
           try { compShapes = JSON.parse(compShapes); } catch(e) { compShapes = []; }
         }
-        if (Array.isArray(compShapes) && compShapes.length > 0) {
+        const hasCustomShapes = Array.isArray(compShapes) && compShapes.length > 0;
+
+        if (!hasCustomShapes) {
+          // Draw the premium CAD board body
+          ctx.save();
+          ctx.fillStyle = '#0f172a'; // Deep slate solder mask
+          ctx.strokeStyle = comp.groupId ? '#3b82f6' : '#1e293b'; 
+          ctx.lineWidth = comp.groupId ? 2.5 : 2;
+          ctx.beginPath();
+          ctx.roundRect(comp.x, comp.y, comp.width, comp.height, 4);
+          ctx.fill();
+          ctx.stroke();
+
+          // Draw a beautiful white silkscreen margin inside the board
+          ctx.strokeStyle = 'rgba(241, 245, 249, 0.15)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(comp.x + 3, comp.y + 3, comp.width - 6, comp.height - 6, 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // Draw microchip CAD graphics for MCUs / Custom chips
+        if (hasCustomShapes) {
           compShapes.forEach(shape => {
             ctx.save();
             ctx.fillStyle = shape.fill || 'transparent';
@@ -601,7 +730,6 @@ export default function SchematicCanvas({
           ctx.lineWidth = 1.5;
           drawComponentSymbol(ctx, comp);
         }
-        ctx.restore();
 
         if (comp.groupId) {
           ctx.fillStyle = '#3b82f6';
@@ -791,7 +919,185 @@ export default function SchematicCanvas({
           ctx.restore();
         });
       }
+
+      // Component Overlays (Health Bar & Fried Marks)
+      if (comp.health !== undefined && comp.health < 100 && comp.health > 0) {
+        ctx.save();
+        const barW = Math.min(80, comp.width * 0.8);
+        const barH = 5;
+        const bx = comp.x + (comp.width - barW) / 2;
+        const by = comp.y + comp.height + 6;
+        
+        ctx.fillStyle = '#ef4444';
+        ctx.fillRect(bx, by, barW, barH);
+        
+        ctx.fillStyle = '#22c55e';
+        ctx.fillRect(bx, by, barW * (comp.health / 100), barH);
+        ctx.restore();
+      }
+
+      if (comp.isFried) {
+        ctx.save();
+        // Charcoal darken overlay
+        ctx.fillStyle = 'rgba(24, 24, 27, 0.7)';
+        ctx.beginPath();
+        ctx.roundRect(comp.x, comp.y, comp.width, comp.height, 4);
+        ctx.fill();
+        
+        // Jagged red lightning crack
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2.5;
+        ctx.shadowBlur = 5;
+        ctx.shadowColor = '#ef4444';
+        
+        ctx.beginPath();
+        ctx.moveTo(comp.x + comp.width * 0.25, comp.y + comp.height * 0.2);
+        ctx.lineTo(comp.x + comp.width * 0.5, comp.y + comp.height * 0.55);
+        ctx.lineTo(comp.x + comp.width * 0.45, comp.y + comp.height * 0.45);
+        ctx.lineTo(comp.x + comp.width * 0.75, comp.y + comp.height * 0.8);
+        ctx.stroke();
+
+        // Drifting smoke rings
+        const smokeOffset = (animTime * 0.05) % 1;
+        const smokeY = comp.y - (smokeOffset * 30);
+        const smokeX = comp.x + comp.width / 2 + Math.sin(animTime * 0.1) * 8;
+        ctx.strokeStyle = `rgba(161, 161, 170, ${1 - smokeOffset})`;
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.arc(smokeX, smokeY, 4 + smokeOffset * 15, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      ctx.restore();
     });
+    }
+
+    // 3. Draw electrical traces (on top of components)
+    traces.forEach((trace) => {
+      const isSelected = trace.id === selectedTraceId;
+      const isVisible = trace.isLocked ? layersVisibility.lockedTraces : layersVisibility.traces;
+      if (!isVisible || !trace.path || trace.path.length < 2) return;
+
+      ctx.lineWidth = trace.isLocked ? 3.5 : (isSelected ? 3 : 2);
+      
+      // Get automatic color based on net type if not manually overridden by a custom color
+      let traceColor = trace.color;
+      if (!traceColor || traceColor === 'auto') {
+        const tc = traceCurrents[trace.id];
+        if (tc) {
+          if (tc.netType === 'ac_live') {
+            traceColor = '#78350f'; // Brown for AC Live
+          } else if (tc.netType === 'ac_neutral') {
+            traceColor = '#64748b'; // Slate Grey for AC Neutral
+          } else if (tc.netType === 'ac_earth') {
+            traceColor = '#16a34a'; // Green for AC Earth/Ground
+          } else if (tc.netType === 'vcc') {
+            traceColor = '#ef4444'; // Red for DC VCC (+)
+          } else if (tc.netType === 'gnd') {
+            traceColor = '#0f172a'; // Black/dark slate for DC GND (-)
+          }
+        }
+      }
+      
+      // Default fallback
+      if (!traceColor) {
+        traceColor = trace.isLocked ? '#d97706' : (isSelected ? '#ef4444' : '#2563eb');
+      }
+
+      ctx.strokeStyle = traceColor;
+
+      ctx.beginPath();
+      ctx.moveTo(trace.path[0].x, trace.path[0].y);
+      for (let i = 1; i < trace.path.length; i++) {
+        ctx.lineTo(trace.path[i].x, trace.path[i].y);
+      }
+      ctx.stroke();
+
+      // Render flowing ions (bidirectional flow)
+      const tc = traceCurrents[trace.id];
+      if (tc && tc.currentMA > 0.05) {
+        const currentScale = Math.min(1000, tc.currentMA);
+        const speed = (currentScale / 20) * 0.8 + 1.2;
+        const spacing = 40;
+        
+        for (let i = 0; i < trace.path.length - 1; i++) {
+          const p1 = trace.path[i];
+          const p2 = trace.path[i + 1];
+          const dx = p2.x - p1.x;
+          const dy = p2.y - p1.y;
+          const len = Math.hypot(dx, dy);
+          if (len < 1) continue;
+
+          // Perpendicular offset normal vectors
+          const nx = -dy / len;
+          const ny = dx / len;
+          
+          // 1. Positive conventional current (Yellow/Orange ions moving in conventional direction)
+          ctx.save();
+          ctx.fillStyle = '#fbbf24';
+          ctx.shadowBlur = 4;
+          ctx.shadowColor = '#f59e0b';
+          const dirFactorPos = tc.direction === 'backward' ? -1 : 1;
+          const movementPos = (animTime * speed * dirFactorPos) % spacing;
+          let offsetPos = movementPos >= 0 ? movementPos : spacing + movementPos;
+          while (offsetPos < len) {
+            const ratio = offsetPos / len;
+            const x = p1.x + dx * ratio + nx * 1.5;
+            const y = p1.y + dy * ratio + ny * 1.5;
+            
+            ctx.beginPath();
+            ctx.arc(x, y, 2.0, 0, 2 * Math.PI);
+            ctx.fill();
+            
+            offsetPos += spacing;
+          }
+          ctx.restore();
+
+          // 2. Negative electron current (Blue/Cyan ions moving in opposite direction)
+          ctx.save();
+          ctx.fillStyle = '#60a5fa';
+          ctx.shadowBlur = 4;
+          ctx.shadowColor = '#3b82f6';
+          const dirFactorNeg = tc.direction === 'backward' ? 1 : -1;
+          const movementNeg = (animTime * speed * dirFactorNeg) % spacing;
+          let offsetNeg = movementNeg >= 0 ? movementNeg : spacing + movementNeg;
+          while (offsetNeg < len) {
+            const ratio = offsetNeg / len;
+            const x = p1.x + dx * ratio - nx * 1.5;
+            const y = p1.y + dy * ratio - ny * 1.5;
+            
+            ctx.beginPath();
+            ctx.arc(x, y, 1.6, 0, 2 * Math.PI);
+            ctx.fill();
+            
+            offsetNeg += spacing;
+          }
+          ctx.restore();
+        }
+      }
+
+      if (isSelected || trace.isLocked) {
+        ctx.fillStyle = trace.isLocked ? '#fbbf24' : '#ef4444';
+        trace.path.forEach(pt => {
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 3.2, 0, 2 * Math.PI);
+          ctx.fill();
+        });
+      }
+    });
+
+    // 4. Draw wire pencil preview (on top of components)
+    if (drawingWireFrom) {
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = wireColor;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      ctx.moveTo(drawingWireFrom.x, drawingWireFrom.y);
+      ctx.lineTo(mousePos.x, drawingWireFrom.y);
+      ctx.lineTo(mousePos.x, mousePos.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     // 6. Draw custom labels / texts
@@ -833,8 +1139,54 @@ export default function SchematicCanvas({
       }
     }
 
+    // Draw Multimeter probe pointer lead line
+    if (probeActive && hoveredPin && mousePos) {
+      const comp = components.find(c => c.id === hoveredPin.compId);
+      if (comp) {
+        ctx.save();
+        // Red probe lead wire
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(mousePos.x, mousePos.y);
+        ctx.lineTo(comp.x + hoveredPin.pin.x, comp.y + hoveredPin.pin.y);
+        ctx.stroke();
+        
+        // Red probe tip dot
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.arc(mousePos.x, mousePos.y, 3, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    if (probeActive && hoveredTraceId && mousePos) {
+      ctx.save();
+      // Red probe tip dot on hovered trace
+      ctx.fillStyle = '#ef4444';
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(mousePos.x, mousePos.y, 4, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
     ctx.restore();
-  }, [components, traces, customTexts, customShapes, pan, zoom, selectedComponentId, selectedTraceId, drawingWireFrom, drawingShapeStart, rulerStart, rulerEnd, mousePos, dimensions, gridSize, layersVisibility, wireColor, hoveredPin]);
+  };
+
+  useEffect(() => {
+    let animFrame;
+    const tick = () => {
+      animTimeRef.current += 1;
+      drawCanvas(animTimeRef.current);
+      animFrame = requestAnimationFrame(tick);
+    };
+    animFrame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animFrame);
+  }, []);
 
   const drawComponentSymbol = (ctx, comp) => {
     const cx = comp.x + comp.width / 2;
@@ -923,7 +1275,8 @@ export default function SchematicCanvas({
     let targetType = 'empty';
     let targetId = null;
 
-    for (const comp of components) {
+    for (let i = components.length - 1; i >= 0; i--) {
+      const comp = components[i];
       if (world.x >= comp.x && world.x <= comp.x + comp.width && world.y >= comp.y && world.y <= comp.y + comp.height) {
         targetType = 'component';
         targetId = comp.id;
@@ -956,9 +1309,13 @@ export default function SchematicCanvas({
   };
 
   const handleMouseDown = (e) => {
+    saveHistory();
     const world = screenToWorld(e.clientX, e.clientY);
     const gridX = snapToGrid(world.x);
     const gridY = snapToGrid(world.y);
+    const selectHitDist = Math.max(12, 12 / zoom);
+    const wireHitDist = Math.max(16, 16 / zoom);
+    const traceHitDist = Math.max(8, 8 / zoom);
 
     if (e.button === 2) {
       return; // Handled by handleContextMenu
@@ -1005,7 +1362,7 @@ export default function SchematicCanvas({
           for (let i = 0; i < trace.path.length; i++) {
             const pt = trace.path[i];
             const dist = Math.hypot(world.x - pt.x, world.y - pt.y);
-            if (dist <= 8) {
+            if (dist <= selectHitDist) {
               setDraggingNodule({ traceId: trace.id, index: i });
               return;
             }
@@ -1013,7 +1370,9 @@ export default function SchematicCanvas({
         }
       }
 
-      for (const comp of components) {
+      let targetPinFound = false;
+      for (let i = components.length - 1; i >= 0; i--) {
+        const comp = components[i];
         for (const pin of comp.pins) {
           const px = comp.x + pin.x;
           const py = comp.y + pin.y;
@@ -1026,7 +1385,7 @@ export default function SchematicCanvas({
           else if (pin.dir === 'down') ty += pinLen;
 
           const dist = Math.hypot(world.x - tx, world.y - ty);
-          if (dist <= 8) {
+          if (dist <= selectHitDist) {
             setDrawingWireFrom({
               compId: comp.id,
               pinName: pin.name,
@@ -1034,12 +1393,15 @@ export default function SchematicCanvas({
               y: ty
             });
             setMousePos(world);
-            return;
+            targetPinFound = true;
+            break;
           }
         }
+        if (targetPinFound) return;
       }
 
-      for (const comp of components) {
+      for (let i = components.length - 1; i >= 0; i--) {
+        const comp = components[i];
         if (world.x >= comp.x && world.x <= comp.x + comp.width && world.y >= comp.y && world.y <= comp.y + comp.height) {
           setDraggingCompId(comp.id);
           setDragOffset({ x: world.x - comp.x, y: world.y - comp.y });
@@ -1052,7 +1414,7 @@ export default function SchematicCanvas({
       for (const trace of traces) {
         if (!trace.path) continue;
         for (let i = 0; i < trace.path.length - 1; i++) {
-          if (distToSegment(world, trace.path[i], trace.path[i+1]) <= 6) {
+          if (distToSegment(world, trace.path[i], trace.path[i+1]) <= traceHitDist) {
             setSelectedTraceId(trace.id);
             setSelectedComponentId(null);
             return;
@@ -1065,7 +1427,9 @@ export default function SchematicCanvas({
     }
 
     else if (activeTool === 'wire') {
-      for (const comp of components) {
+      let targetPinFound = false;
+      for (let i = components.length - 1; i >= 0; i--) {
+        const comp = components[i];
         for (const pin of comp.pins) {
           const px = comp.x + pin.x;
           const py = comp.y + pin.y;
@@ -1074,8 +1438,10 @@ export default function SchematicCanvas({
           const pinLen = 8;
           if (pin.dir === 'left') tx -= pinLen;
           else if (pin.dir === 'right') tx += pinLen;
+          else if (pin.dir === 'up') ty -= pinLen;
+          else if (pin.dir === 'down') ty += pinLen;
           const dist = Math.hypot(world.x - tx, world.y - ty);
-          if (dist <= 12) {
+          if (dist <= wireHitDist) {
             setDrawingWireFrom({
               compId: comp.id,
               pinName: pin.name,
@@ -1083,9 +1449,11 @@ export default function SchematicCanvas({
               y: ty
             });
             setMousePos(world);
-            return;
+            targetPinFound = true;
+            break;
           }
         }
+        if (targetPinFound) return;
       }
     }
 
@@ -1171,14 +1539,32 @@ export default function SchematicCanvas({
       return;
     }
 
-    if (drawingWireFrom || drawingShapeStart || rulerStart) {
+    if (drawingWireFrom || drawingShapeStart || rulerStart || probeActive) {
       setMousePos(world);
     }
 
+    // Trace hovering detection for multimeter probe
+    let foundHoveredTraceId = null;
+    if (probeActive && !isPanning && !draggingCompId && !draggingNodule) {
+      const traceHitDist = Math.max(8, 8 / zoom);
+      for (const trace of traces) {
+        if (!trace.path) continue;
+        for (let i = 0; i < trace.path.length - 1; i++) {
+          if (distToSegment(world, trace.path[i], trace.path[i+1]) <= traceHitDist) {
+            foundHoveredTraceId = trace.id;
+            break;
+          }
+        }
+        if (foundHoveredTraceId) break;
+      }
+    }
+    setHoveredTraceId(foundHoveredTraceId);
+
     // Pin hovering detection
     let foundHovered = null;
-    if (activeTool === 'select' && !isPanning && !draggingCompId && !draggingNodule) {
-      for (const comp of components) {
+    if ((activeTool === 'select' || probeActive) && !isPanning && !draggingCompId && !draggingNodule) {
+      for (let i = components.length - 1; i >= 0; i--) {
+        const comp = components[i];
         for (const pin of comp.pins) {
           const px = comp.x + pin.x;
           const py = comp.y + pin.y;
@@ -1190,9 +1576,10 @@ export default function SchematicCanvas({
           else if (pin.dir === 'up') ty -= pinLen;
           else if (pin.dir === 'down') ty += pinLen;
 
+          const hoverHitDist = Math.max(12, 12 / zoom);
           const distCircle = Math.hypot(world.x - tx, world.y - ty);
           const distLabel = Math.hypot(world.x - px, world.y - py);
-          if (distCircle <= 10 || distLabel <= 10) {
+          if (distCircle <= hoverHitDist || distLabel <= hoverHitDist) {
             foundHovered = {
               compId: comp.id,
               pinName: pin.name,
@@ -1250,12 +1637,14 @@ export default function SchematicCanvas({
       setIsPanning(false);
       return;
     }
+    const wireHitDist = Math.max(16, 16 / zoom);
 
     if (draggingNodule) {
       const world = screenToWorld(e.clientX, e.clientY);
       let targetPin = null;
 
-      for (const comp of components) {
+      for (let i = components.length - 1; i >= 0; i--) {
+        const comp = components[i];
         for (const pin of comp.pins) {
           const px = comp.x + pin.x;
           const py = comp.y + pin.y;
@@ -1268,7 +1657,7 @@ export default function SchematicCanvas({
           else if (pin.dir === 'down') ty += pinLen;
 
           const dist = Math.hypot(world.x - tx, world.y - ty);
-          if (dist <= 12) {
+          if (dist <= wireHitDist) {
             targetPin = `${comp.id}.${pin.name}`;
             break;
           }
@@ -1325,7 +1714,8 @@ export default function SchematicCanvas({
       const world = screenToWorld(e.clientX, e.clientY);
       let targetPinFound = false;
 
-      for (const comp of components) {
+      for (let i = components.length - 1; i >= 0; i--) {
+        const comp = components[i];
         if (comp.id === drawingWireFrom.compId) continue;
 
         for (const pin of comp.pins) {
@@ -1340,7 +1730,7 @@ export default function SchematicCanvas({
           else if (pin.dir === 'down') ty += pinLen;
 
           const dist = Math.hypot(world.x - tx, world.y - ty);
-          if (dist <= 12) {
+          if (dist <= wireHitDist) {
             const fromStr = `${drawingWireFrom.compId}.${drawingWireFrom.pinName}`;
             const toStr = `${comp.id}.${pin.name}`;
 
@@ -1370,18 +1760,295 @@ export default function SchematicCanvas({
     }
   };
 
+  const saveHistory = () => {
+    const currentState = {
+      components: JSON.parse(JSON.stringify(components)),
+      traces: JSON.parse(JSON.stringify(traces)),
+      customTexts: JSON.parse(JSON.stringify(customTexts)),
+      customShapes: JSON.parse(JSON.stringify(customShapes))
+    };
+    if (historyRef.current.length > 0) {
+      const lastState = historyRef.current[historyRef.current.length - 1];
+      if (JSON.stringify(lastState) === JSON.stringify(currentState)) {
+        return;
+      }
+    }
+    historyRef.current.push(currentState);
+    if (historyRef.current.length > 50) {
+      historyRef.current.shift();
+    }
+    redoRef.current = [];
+  };
+
+  const undo = () => {
+    if (historyRef.current.length === 0) return;
+    const currentState = {
+      components: JSON.parse(JSON.stringify(components)),
+      traces: JSON.parse(JSON.stringify(traces)),
+      customTexts: JSON.parse(JSON.stringify(customTexts)),
+      customShapes: JSON.parse(JSON.stringify(customShapes))
+    };
+    redoRef.current.push(currentState);
+    const prevState = historyRef.current.pop();
+    setComponents(prevState.components);
+    setTraces(prevState.traces);
+    setCustomTexts(prevState.customTexts);
+    setCustomShapes(prevState.customShapes);
+  };
+
+  const redo = () => {
+    if (redoRef.current.length === 0) return;
+    const currentState = {
+      components: JSON.parse(JSON.stringify(components)),
+      traces: JSON.parse(JSON.stringify(traces)),
+      customTexts: JSON.parse(JSON.stringify(customTexts)),
+      customShapes: JSON.parse(JSON.stringify(customShapes))
+    };
+    historyRef.current.push(currentState);
+    const nextState = redoRef.current.pop();
+    setComponents(nextState.components);
+    setTraces(nextState.traces);
+    setCustomTexts(nextState.customTexts);
+    setCustomShapes(nextState.customShapes);
+  };
+
+  const handleCopy = async () => {
+    if (!selectedComponentId) return;
+    const comp = components.find(c => c.id === selectedComponentId);
+    if (!comp) return;
+    const payload = {
+      wiretracks_element: 'component',
+      data: {
+        libraryId: comp.libraryId,
+        width: comp.width,
+        height: comp.height,
+        pins: comp.pins,
+        label: comp.label,
+        name: comp.name,
+        value: comp.value,
+        voltageV: comp.voltageV,
+        capacityAh: comp.capacityAh,
+        esr: comp.esr,
+        zenerV: comp.zenerV,
+        powerW: comp.powerW,
+        efficiency: comp.efficiency,
+        wiperPct: comp.wiperPct,
+        lux: comp.lux,
+        tempC: comp.tempC
+      }
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      console.log('Copied component JSON to clipboard!');
+    } catch (err) {
+      console.error('Copy failed:', err);
+    }
+  };
+
+  const handlePaste = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      const payload = JSON.parse(text);
+      if (payload && payload.wiretracks_element === 'component' && payload.data) {
+        saveHistory();
+        const data = payload.data;
+        const newId = `COMP_${Date.now()}`;
+        const newName = `${data.name.replace(/\d+$/, '')}${components.length + 1}`;
+        const pasteX = snapToGrid(mousePos?.x || 100);
+        const pasteY = snapToGrid(mousePos?.y || 100);
+        const newComp = {
+          ...data,
+          id: newId,
+          name: newName,
+          x: pasteX,
+          y: pasteY,
+          health: 100,
+          isFried: false,
+          chargePct: 1.0
+        };
+        setComponents(prev => [...prev, newComp]);
+        setSelectedComponentId(newId);
+        console.log('Pasted component!');
+      }
+    } catch (err) {
+      console.error('Paste failed/invalid JSON:', err);
+    }
+  };
+
   const handleKeyPress = (e) => {
+    const isEditing = document.activeElement && 
+                     (document.activeElement.tagName === 'INPUT' || 
+                      document.activeElement.tagName === 'TEXTAREA');
+
     if (e.key === 'Escape') {
       setDrawingWireFrom(null);
       setDrawingShapeStart(null);
       setRulerStart(null);
       setRulerEnd(null);
+      setCommandPaletteOpen(false);
+      setShortcutsMenuOpen(false);
+      return;
     }
+
+    // Command Palette shortcut: Cmd+P / Ctrl+P
+    if ((e.metaKey || e.ctrlKey) && e.key === 'p') {
+      e.preventDefault();
+      setCommandPaletteOpen(prev => !prev);
+      setPaletteSearchQuery('');
+      setPaletteSelectedIndex(0);
+      return;
+    }
+
+    if (isEditing) return;
+
+    // Undo: Cmd+Z / Ctrl+Z
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undo();
+      return;
+    }
+
+    // Redo: Cmd+Shift+Z / Ctrl+Shift+Z
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && e.shiftKey) {
+      e.preventDefault();
+      redo();
+      return;
+    }
+
+    // Copy: Cmd+C / Ctrl+C
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+      e.preventDefault();
+      handleCopy();
+      return;
+    }
+
+    // Paste: Cmd+V / Ctrl+V
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
+      e.preventDefault();
+      handlePaste();
+      return;
+    }
+
+    // Delete selected component
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (selectedComponentId) {
+        saveHistory();
+        setComponents(prev => prev.filter(c => c.id !== selectedComponentId));
+        setTraces(prev => prev.filter(t => !t.from.startsWith(`${selectedComponentId}.`) && !t.to.startsWith(`${selectedComponentId}.`)));
+        setSelectedComponentId(null);
+        e.preventDefault();
+      }
+      return;
+    }
+
+    // Arrow Key Panning
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setPan(p => ({ ...p, y: p.y + 30 }));
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setPan(p => ({ ...p, y: p.y - 30 }));
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      setPan(p => ({ ...p, x: p.x + 30 }));
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      setPan(p => ({ ...p, x: p.x - 30 }));
+    }
+
+    // Tool switching keys
+    if (e.key.toLowerCase() === 'v') setActiveTool('select');
+    if (e.key.toLowerCase() === 'h') setActiveTool('pan');
+    if (e.key.toLowerCase() === 'w') setActiveTool('wire');
+    if (e.key.toLowerCase() === 't') setActiveTool('text');
+    if (e.key.toLowerCase() === 's') setActiveTool('shape');
+    if (e.key.toLowerCase() === 'm') setActiveTool('ruler');
+    if (e.key.toLowerCase() === 'e') setActiveTool('eraser');
   };
+
+  const stateRef = useRef({ 
+    components, 
+    traces, 
+    customTexts, 
+    customShapes, 
+    selectedComponentId, 
+    mousePos, 
+    commandPaletteOpen 
+  });
+  
+  useEffect(() => {
+    stateRef.current = { 
+      components, 
+      traces, 
+      customTexts, 
+      customShapes, 
+      selectedComponentId, 
+      mousePos, 
+      commandPaletteOpen 
+    };
+  }, [components, traces, customTexts, customShapes, selectedComponentId, mousePos, commandPaletteOpen]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
+  }, []);
+
+  const zoomPanRef = useRef({ zoom: 1, pan: { x: 100, y: 80 } });
+
+  useEffect(() => {
+    zoomPanRef.current = { zoom, pan };
+  }, [zoom, pan]);
+
+  // Combined wheel/pan/zoom effect overriding native trackpad gestures
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (e) => {
+      e.preventDefault();
+      const { zoom: currentZoom, pan: currentPan } = zoomPanRef.current;
+
+      if (e.ctrlKey) {
+        // Centered Zooming on trackpad pinch / ctrl+wheel scroll
+        const zoomFactor = 1.08;
+        const newZoom = e.deltaY < 0 
+          ? Math.min(4.0, currentZoom * zoomFactor) 
+          : Math.max(0.2, currentZoom / zoomFactor);
+
+        if (newZoom !== currentZoom) {
+          const rect = container.getBoundingClientRect();
+          const mouseX = e.clientX - rect.left;
+          const mouseY = e.clientY - rect.top;
+
+          const worldX = (mouseX - currentPan.x) / currentZoom;
+          const worldY = (mouseY - currentPan.y) / currentZoom;
+
+          const newPanX = mouseX - worldX * newZoom;
+          const newPanY = mouseY - worldY * newZoom;
+
+          setZoom(newZoom);
+          setPan({ x: newPanX, y: newPanY });
+        }
+      } else {
+        // Trackpad panning (2-finger scroll)
+        setPan({
+          x: currentPan.x - e.deltaX,
+          y: currentPan.y - e.deltaY
+        });
+      }
+    };
+
+    const handleGestureStart = (e) => e.preventDefault();
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    container.addEventListener('gesturestart', handleGestureStart, { passive: false });
+    container.addEventListener('gesturechange', handleGestureStart, { passive: false });
+
+    return () => {
+      container.removeEventListener('wheel', handleWheel);
+      container.removeEventListener('gesturestart', handleGestureStart);
+      container.removeEventListener('gesturechange', handleGestureStart);
+    };
   }, []);
 
   const distToSegment = (p, v, w) => {
@@ -1400,6 +2067,7 @@ export default function SchematicCanvas({
   };
 
   const handleRotateComponent = (compId) => {
+    saveHistory();
     const target = components.find(c => c.id === compId);
     if (!target) return;
     const newWidth = target.height;
@@ -1433,6 +2101,7 @@ export default function SchematicCanvas({
   };
 
   const handleDistributePins = (compId) => {
+    saveHistory();
     setComponents(prev => prev.map(c => {
       if (c.id === compId) {
         if (!c.pins || c.pins.length === 0) return c;
@@ -1843,6 +2512,234 @@ Format output strictly as a JSON object:
     return 'cursor-default';
   };
 
+  let measuredValue = '0.00';
+  let measuredUnit = 'V';
+  let modeLabel = 'DC V';
+  let dialAngle = -90; // OFF position
+  let probeName = 'NO CONNECTION';
+
+  if (probeActive) {
+    if (hoveredPin) {
+      const comp = components.find(c => c.id === hoveredPin.compId);
+      if (comp) {
+        probeName = `${comp.id}.${hoveredPin.pinName}`;
+        const volt = (comp.pinVoltages && comp.pinVoltages[hoveredPin.pinName] !== undefined)
+          ? comp.pinVoltages[hoveredPin.pinName]
+          : 0.0;
+        measuredValue = volt.toFixed(2);
+        measuredUnit = 'V';
+        
+        const pinNameUpper = hoveredPin.pinName.toUpperCase();
+        const isAC = pinNameUpper.includes('AC') || 
+                     pinNameUpper === 'HOT' || 
+                     pinNameUpper === 'NEUT' || 
+                     pinNameUpper === 'EARTH' ||
+                     pinNameUpper === 'L' ||
+                     pinNameUpper === 'N' ||
+                     pinNameUpper === 'E';
+                     
+        if (isAC) {
+          modeLabel = 'AC V';
+          dialAngle = -135; // Point to ACV on rotary dial
+        } else {
+          modeLabel = 'DC V';
+          dialAngle = -30; // Point to DCV
+        }
+      }
+    } else if (hoveredTraceId) {
+      const trace = traces.find(t => t.id === hoveredTraceId);
+      const tc = traceCurrents[hoveredTraceId];
+      if (trace) {
+        probeName = trace.id;
+        let volt = 0.0;
+        const [startCompId, startPinName] = trace.from.split('.');
+        const startComp = components.find(c => c.id === startCompId);
+        if (startComp && startComp.pinVoltages && startComp.pinVoltages[startPinName] !== undefined) {
+          volt = startComp.pinVoltages[startPinName];
+        }
+        
+        const isAC = tc && (tc.netType === 'ac_live' || tc.netType === 'ac_neutral' || tc.netType === 'ac_earth');
+        
+        if (isAC) {
+          measuredValue = volt.toFixed(1);
+          measuredUnit = 'V';
+          modeLabel = 'AC V';
+          dialAngle = -135; // Point to ACV on rotary dial
+        } else if (tc && tc.currentMA > 0) {
+          measuredValue = tc.currentMA.toFixed(1);
+          measuredUnit = 'mA';
+          modeLabel = 'DC mA';
+          dialAngle = 30; // Point to mA
+        } else {
+          measuredValue = volt.toFixed(2);
+          measuredUnit = 'V';
+          modeLabel = 'DC V';
+          dialAngle = -30; // Point to DCV
+        }
+      }
+    }
+  }
+
+  const commands = [
+    {
+      name: 'Place Buck-Boost Regulator',
+      keywords: 'buck boost power convert xl6009',
+      shortcut: 'Cmd/Ctrl+P ONLY',
+      action: () => {
+        saveHistory();
+        const newId = `COMP_${Date.now()}`;
+        const newComp = {
+          id: newId,
+          libraryId: 'buck_boost_mini',
+          name: `REGULATOR${components.length + 1}`,
+          label: 'Buck-Boost Converter',
+          x: snapToGrid(mousePos?.x || 100),
+          y: snapToGrid(mousePos?.y || 100),
+          width: 150,
+          height: 120,
+          pins: [
+            { name: 'IN+', x: 0, y: 30, dir: 'left' },
+            { name: 'IN-', x: 0, y: 90, dir: 'left' },
+            { name: 'OUT+', x: 150, y: 30, dir: 'right' },
+            { name: 'OUT-', x: 150, y: 90, dir: 'right' }
+          ],
+          health: 100,
+          isFried: false,
+          chargePct: 1.0
+        };
+        setComponents(prev => [...prev, newComp]);
+        setSelectedComponentId(newId);
+      }
+    },
+    {
+      name: 'Place Schottky Diode',
+      keywords: 'diode schottky 1n5819 rectifier',
+      shortcut: 'Cmd/Ctrl+P ONLY',
+      action: () => {
+        saveHistory();
+        const newId = `COMP_${Date.now()}`;
+        const newComp = {
+          id: newId,
+          libraryId: 'diode_schottky',
+          name: `DIODE${components.length + 1}`,
+          label: '1N5819 Schottky',
+          x: snapToGrid(mousePos?.x || 100),
+          y: snapToGrid(mousePos?.y || 100),
+          width: 60,
+          height: 30,
+          pins: [
+            { name: 'A', x: 0, y: 15, dir: 'left' },
+            { name: 'K', x: 60, y: 15, dir: 'right' }
+          ],
+          health: 100,
+          isFried: false,
+          chargePct: 1.0
+        };
+        setComponents(prev => [...prev, newComp]);
+        setSelectedComponentId(newId);
+      }
+    },
+    {
+      name: 'Place SLA Battery (12V)',
+      keywords: 'battery sla 12v power source',
+      shortcut: 'Cmd/Ctrl+P ONLY',
+      action: () => {
+        saveHistory();
+        const newId = `COMP_${Date.now()}`;
+        const newComp = {
+          id: newId,
+          libraryId: 'battery_sla_12v',
+          name: `BATTERY${components.length + 1}`,
+          label: '12V SLA Battery',
+          x: snapToGrid(mousePos?.x || 100),
+          y: snapToGrid(mousePos?.y || 100),
+          width: 300,
+          height: 600,
+          pins: [
+            { name: '+', x: 75, y: 0, dir: 'up' },
+            { name: '-', x: 225, y: 0, dir: 'up' }
+          ],
+          health: 100,
+          isFried: false,
+          chargePct: 1.0
+        };
+        setComponents(prev => [...prev, newComp]);
+        setSelectedComponentId(newId);
+      }
+    },
+    {
+      name: 'Toggle Multimeter Probe',
+      keywords: 'probe voltmeter multimeter active',
+      shortcut: 'P',
+      action: () => {
+        window.dispatchEvent(new CustomEvent('toggle-multimeter-probe'));
+      }
+    },
+    {
+      name: 'Start / Stop Physics Simulation',
+      keywords: 'simulate run pause physics start stop',
+      shortcut: 'Simulate Btn',
+      action: () => {
+        window.dispatchEvent(new CustomEvent('toggle-simulation'));
+      }
+    },
+    {
+      name: 'Reset Board SimulationStates',
+      keywords: 'reset board simulation health charges',
+      shortcut: 'Reset Btn',
+      action: () => {
+        window.dispatchEvent(new CustomEvent('reset-simulation'));
+      }
+    },
+    {
+      name: 'Zoom to Fit / Reset Camera',
+      keywords: 'zoom reset camera center fit screen',
+      shortcut: 'Double Click Pan',
+      action: () => {
+        setPan({ x: 100, y: 80 });
+        setZoom(1);
+      }
+    },
+    {
+      name: 'Clear Entire Canvas',
+      keywords: 'clear delete erase all empty remove',
+      shortcut: 'Cmd/Ctrl+P ONLY',
+      action: () => {
+        if (confirm('Clear the entire schematic canvas?')) {
+          saveHistory();
+          setComponents([]);
+          setTraces([]);
+          setCustomTexts([]);
+          setCustomShapes([]);
+          setSelectedComponentId(null);
+          setSelectedTraceId(null);
+        }
+      }
+    }
+  ];
+
+  const filteredCommands = commands.filter(cmd => {
+    const query = paletteSearchQuery.toLowerCase();
+    return cmd.name.toLowerCase().includes(query) || 
+           cmd.keywords.toLowerCase().includes(query);
+  });
+
+  const handlePaletteKeyDown = (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setPaletteSelectedIndex(prev => (prev + 1) % filteredCommands.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setPaletteSelectedIndex(prev => (prev - 1 + filteredCommands.length) % filteredCommands.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (filteredCommands[paletteSelectedIndex]) {
+        filteredCommands[paletteSelectedIndex].action();
+        setCommandPaletteOpen(false);
+      }
+    }
+  };
+
   return (
     <div 
       ref={containerRef} 
@@ -1853,7 +2750,7 @@ Format output strictly as a JSON object:
       <div className="absolute left-3 top-1/2 -translate-y-1/2 z-15 flex items-stretch">
         
         {/* Core Vertical Tool Strip */}
-        <div className="flex flex-col bg-white/95 backdrop-blur border border-slate-200/80 p-1.5 rounded-xl shadow-md space-y-1.5 z-20">
+        <div className="flex flex-col bg-white/95 backdrop-blur border border-slate-100/80 p-1.5 rounded-xl shadow-md space-y-1.5 z-20">
           <button
             onClick={() => { setActiveTool('select'); setDrawingWireFrom(null); setRulerStart(null); setDrawingShapeStart(null); }}
             className={`p-2 rounded-lg transition-all ${activeTool === 'select' && !spacePressed ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100'}`}
@@ -1919,21 +2816,41 @@ Format output strictly as a JSON object:
           >
             <HelpCircle size={15} />
           </button>
+
+          <button
+            onClick={runSchematicAutopositioner}
+            className="p-2 rounded-lg text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 transition"
+            title="Auto-Position & Route Schematic"
+          >
+            <Sparkles size={15} />
+          </button>
         </div>
 
         {/* macOS Style Slide-out suboptions panel */}
         {activeTool && activeTool !== 'select' && activeTool !== 'pan' && (
-          <div className="ml-2 bg-white/95 backdrop-blur border border-slate-200/80 rounded-xl shadow-md p-3 text-[11px] text-slate-700 flex flex-col justify-center transition-all duration-300 transform translate-x-0 w-44 z-10 select-none animate-in fade-in slide-in-from-left-4">
+          <div className="ml-2 bg-white/95 backdrop-blur border border-slate-100/80 rounded-xl shadow-md p-3 text-[11px] text-slate-700 flex flex-col justify-center transition-all duration-300 transform translate-x-0 w-44 z-10 select-none animate-in fade-in slide-in-from-left-4">
             {activeTool === 'wire' && (
               <div className="space-y-2 font-sans">
                 <div className="font-bold border-b border-slate-100 pb-1 text-slate-800">Wire Settings</div>
                 <div>
                   <span className="text-[9px] text-slate-400 font-bold block mb-1">Trace Color:</span>
-                  <div className="flex space-x-1.5">
-                    <button onClick={() => setWireColor('#2563eb')} className={`w-4 h-4 rounded-full bg-blue-600 border ${wireColor === '#2563eb' ? 'border-slate-800 scale-110' : 'border-slate-300'}`} title="Signal Net (Blue)" />
-                    <button onClick={() => setWireColor('#dc2626')} className={`w-4 h-4 rounded-full bg-red-600 border ${wireColor === '#dc2626' ? 'border-slate-800 scale-110' : 'border-slate-300'}`} title="5V VCC (Red)" />
-                    <button onClick={() => setWireColor('#16a34a')} className={`w-4 h-4 rounded-full bg-green-600 border ${wireColor === '#16a34a' ? 'border-slate-800 scale-110' : 'border-slate-300'}`} title="GPIO (Green)" />
-                    <button onClick={() => setWireColor('#d97706')} className={`w-4 h-4 rounded-full bg-amber-600 border ${wireColor === '#d97706' ? 'border-slate-800 scale-110' : 'border-slate-300'}`} title="Locked Solder (Gold)" />
+                  <div className="flex items-center space-x-1.5">
+                    <button 
+                      onClick={() => setWireColor('auto')} 
+                      className={`px-1.5 py-0.5 rounded text-[8px] font-bold border ${
+                        wireColor === 'auto' 
+                          ? 'bg-slate-900 text-white border-slate-700 font-bold' 
+                          : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'
+                      } cursor-pointer transition`}
+                      title="Auto VCC/GND coloring"
+                    >
+                      AUTO
+                    </button>
+                    <button onClick={() => setWireColor('#2563eb')} className={`w-4 h-4 rounded-full bg-blue-600 border ${wireColor === '#2563eb' ? 'border-slate-800 scale-110' : 'border-slate-300'} cursor-pointer`} title="Signal Net (Blue)" />
+                    <button onClick={() => setWireColor('#dc2626')} className={`w-4 h-4 rounded-full bg-red-600 border ${wireColor === '#dc2626' ? 'border-slate-800 scale-110' : 'border-slate-300'} cursor-pointer`} title="VCC (Red)" />
+                    <button onClick={() => setWireColor('#0f172a')} className={`w-4 h-4 rounded-full bg-slate-900 border ${wireColor === '#0f172a' ? 'border-slate-800 scale-110' : 'border-slate-300'} cursor-pointer`} title="GND (Black)" />
+                    <button onClick={() => setWireColor('#16a34a')} className={`w-4 h-4 rounded-full bg-green-600 border ${wireColor === '#16a34a' ? 'border-slate-800 scale-110' : 'border-slate-300'} cursor-pointer`} title="GPIO (Green)" />
+                    <button onClick={() => setWireColor('#d97706')} className={`w-4 h-4 rounded-full bg-amber-600 border ${wireColor === '#d97706' ? 'border-slate-800 scale-110' : 'border-slate-300'} cursor-pointer`} title="Locked Solder (Gold)" />
                   </div>
                 </div>
                 <div>
@@ -1941,7 +2858,7 @@ Format output strictly as a JSON object:
                   <select 
                     value={autoPenaltyMode} 
                     onChange={(e) => setAutoPenaltyMode(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded px-1 py-0.5 text-[9px] text-slate-600 outline-none"
+                    className="w-full bg-slate-50 border border-slate-100 rounded px-1 py-0.5 text-[9px] text-slate-600 outline-none"
                   >
                     <option value="high">High Cost Crossings</option>
                     <option value="low">Low Penalty Overlaps</option>
@@ -1986,7 +2903,7 @@ Format output strictly as a JSON object:
         <div 
           style={{ top: contextMenu.y, left: contextMenu.x }} 
           onMouseDown={(e) => e.stopPropagation()}
-          className="absolute z-50 bg-white border border-slate-200 rounded-lg shadow-lg py-1 text-xs text-slate-700 min-w-[150px] font-sans"
+          className="absolute z-50 bg-white border border-slate-100 rounded-lg shadow-lg py-1 text-xs text-slate-700 min-w-[150px] font-sans"
         >
           {contextMenu.type === 'component' && (
             <>
@@ -2146,7 +3063,7 @@ Format output strictly as a JSON object:
             className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center font-sans p-4"
             onMouseDown={(e) => e.stopPropagation()}
           >
-            <div className="bg-white rounded-2xl border border-slate-200/80 shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[95%] animate-in fade-in zoom-in duration-200">
+            <div className="bg-white rounded-2xl border border-slate-100/80 shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[95%] animate-in fade-in zoom-in duration-200">
               {/* Modal Header */}
               <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
                 <div>
@@ -2174,7 +3091,7 @@ Format output strictly as a JSON object:
                           value={skinPicker.width}
                           min={minW}
                           onChange={(e) => setSkinPicker(prev => ({ ...prev, width: Math.max(minW, Number(e.target.value)) }))}
-                          className="w-full text-xs px-2 py-1.5 border border-slate-200 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                          className="w-full text-xs px-2 py-1.5 border border-slate-100 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
                         />
                       </div>
                       
@@ -2185,7 +3102,7 @@ Format output strictly as a JSON object:
                           value={skinPicker.height}
                           min={minH}
                           onChange={(e) => setSkinPicker(prev => ({ ...prev, height: Math.max(minH, Number(e.target.value)) }))}
-                          className="w-full text-xs px-2 py-1.5 border border-slate-200 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                          className="w-full text-xs px-2 py-1.5 border border-slate-100 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
                         />
                       </div>
 
@@ -2197,7 +3114,7 @@ Format output strictly as a JSON object:
                           min={5}
                           max={50}
                           onChange={(e) => updatePitch(Number(e.target.value))}
-                          className="w-full text-xs px-2 py-1.5 border border-slate-200 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                          className="w-full text-xs px-2 py-1.5 border border-slate-100 rounded bg-white font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
                         />
                       </div>
                     </div>
@@ -2223,7 +3140,7 @@ Format output strictly as a JSON object:
                       placeholder="e.g. Pin 1: VCC (power, top)&#10;Pin 2: GND (bottom)&#10;Pin 3: GPIO4 (left)&#10;Pin 4: RXD0 (right)"
                       value={pinoutReference}
                       onChange={(e) => setPinoutReference(e.target.value)}
-                      className="w-full text-[10px] p-2 border border-slate-200 rounded-lg bg-white font-mono outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 h-20 resize-none leading-normal"
+                      className="w-full text-[10px] p-2 border border-slate-100 rounded-lg bg-white font-mono outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 h-20 resize-none leading-normal"
                       disabled={isSmartPlacing}
                     />
                     
@@ -2232,7 +3149,7 @@ Format output strictly as a JSON object:
                         type="button"
                         onClick={applyHeuristicPlacement}
                         disabled={isSmartPlacing || !pinoutReference.trim()}
-                        className="px-2.5 py-1.5 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:bg-slate-50 disabled:text-slate-300 rounded text-[10px] font-semibold transition flex items-center justify-center gap-1 shadow-sm"
+                        className="px-2.5 py-1.5 bg-white border border-slate-100 text-slate-700 hover:bg-slate-50 disabled:bg-slate-50 disabled:text-slate-300 rounded text-[10px] font-semibold transition flex items-center justify-center gap-1 shadow-sm"
                         title="Distributes pins sequentially based on keywords/ordering in the text"
                       >
                         ⚡ Heuristic Algo
@@ -2250,7 +3167,7 @@ Format output strictly as a JSON object:
                   </div>
 
                   {/* SVG Live Mockup Preview Box */}
-                  <div className="flex-1 border border-slate-200/60 rounded-xl bg-slate-950 flex flex-col items-center justify-center p-4 relative min-h-[280px]">
+                  <div className="flex-1 border border-slate-100/60 rounded-xl bg-slate-950 flex flex-col items-center justify-center p-4 relative min-h-[280px]">
                     <div className="absolute top-3 left-3 text-[10px] font-mono text-slate-500 uppercase tracking-wider">
                       Live CAD Mockup Preview
                     </div>
@@ -2364,7 +3281,7 @@ Format output strictly as a JSON object:
                       return (
                         <div 
                           key={p.name} 
-                          className="flex items-center justify-between p-2.5 bg-white border border-slate-200/60 rounded-lg shadow-sm hover:border-slate-300 transition"
+                          className="flex items-center justify-between p-2.5 bg-white border border-slate-100/60 rounded-lg shadow-sm hover:border-slate-300 transition"
                         >
                           <div className="flex items-center space-x-2">
                             <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
@@ -2398,7 +3315,7 @@ Format output strictly as a JSON object:
                               <button
                                 type="button"
                                 onClick={() => nudgePinOffset(p.name, -5)}
-                                className="w-5 h-5 rounded border border-slate-200 flex items-center justify-center text-xs hover:bg-slate-50 text-slate-600 font-semibold"
+                                className="w-5 h-5 rounded border border-slate-100 flex items-center justify-center text-xs hover:bg-slate-50 text-slate-600 font-semibold"
                               >
                                 -
                               </button>
@@ -2408,7 +3325,7 @@ Format output strictly as a JSON object:
                               <button
                                 type="button"
                                 onClick={() => nudgePinOffset(p.name, 5)}
-                                className="w-5 h-5 rounded border border-slate-200 flex items-center justify-center text-xs hover:bg-slate-50 text-slate-600 font-semibold"
+                                className="w-5 h-5 rounded border border-slate-100 flex items-center justify-center text-xs hover:bg-slate-50 text-slate-600 font-semibold"
                               >
                                 +
                               </button>
@@ -2425,7 +3342,7 @@ Format output strictly as a JSON object:
               <div className="px-5 py-3.5 border-t border-slate-100 bg-slate-50/50 flex items-center justify-end space-x-2">
                 <button
                   onClick={() => setSkinPicker(null)}
-                  className="px-4 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-600 font-semibold hover:bg-slate-50 transition"
+                  className="px-4 py-1.5 bg-white border border-slate-100 rounded-lg text-xs text-slate-600 font-semibold hover:bg-slate-50 transition"
                 >
                   Cancel
                 </button>
@@ -2488,7 +3405,7 @@ Format output strictly as a JSON object:
             zIndex: 9999,
             pointerEvents: 'none'
           }}
-          className="bg-white/95 backdrop-blur-md border border-slate-200/80 rounded-xl p-3 shadow-xl shadow-slate-200/50 max-w-xs transition-all duration-150 animate-in fade-in zoom-in-95"
+          className="bg-white/95 backdrop-blur-md border border-slate-100/80 rounded-xl p-3 shadow-xl shadow-slate-200/50 max-w-xs transition-all duration-150 animate-in fade-in zoom-in-95"
         >
           <div className="space-y-1.5 font-sans">
             <div className="flex items-center space-x-1.5">
@@ -2522,6 +3439,197 @@ Format output strictly as a JSON object:
                   ))}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Gardner Bender Pocket Multimeter Tool Panel */}
+      {probeActive && (
+        <div className="absolute bottom-6 right-6 z-40 w-56 bg-gradient-to-b from-red-600 to-red-700 border-2 border-red-900 rounded-2xl shadow-2xl p-3 flex flex-col items-center select-none font-sans text-white border-t-red-500 shadow-slate-950/75 pointer-events-auto">
+          {/* Casing Top Grip / Loop */}
+          <div className="w-12 h-1.5 bg-red-800 rounded-full mb-2"></div>
+          
+          {/* Brand/Model Logo header */}
+          <div className="text-center w-full mb-1.5">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-100 font-mono">GARDNER BENDER</span>
+            <div className="text-[7px] text-red-200 font-bold uppercase tracking-wider -mt-0.5">GMT-312 Pocket Multimeter</div>
+          </div>
+          
+          {/* High Contrast Cyan LCD Display */}
+          <div className="w-full bg-slate-950 border-2 border-slate-900 rounded-lg p-2.5 shadow-inner flex flex-col mb-3">
+            <div className="flex justify-between items-center text-[7px] font-mono text-cyan-400/60 uppercase tracking-widest mb-1.5">
+              <span>AUTO RANGE</span>
+              <span>{modeLabel}</span>
+            </div>
+            <div className="flex justify-between items-baseline font-mono select-none">
+              <span className="text-2xl font-bold tracking-tight text-cyan-400 drop-shadow-[0_0_4px_rgba(34,211,238,0.5)]">
+                {measuredValue}
+              </span>
+              <span className="text-sm font-bold text-cyan-400 drop-shadow-[0_0_4px_rgba(34,211,238,0.5)] ml-1">
+                {measuredUnit}
+              </span>
+            </div>
+            <div className="mt-2 pt-1 border-t border-slate-900 flex justify-between items-center text-[7px] font-mono text-slate-500">
+              <span className="truncate max-w-[120px]">PROBE: {probeName}</span>
+              <span className="text-emerald-500 font-bold">LIVE</span>
+            </div>
+          </div>
+          
+          {/* Multimeter Rotary Dial */}
+          <div className="relative w-28 h-28 bg-slate-900 border-4 border-slate-950 rounded-full shadow-inner flex items-center justify-center my-1 select-none">
+            {/* Legend Labels around dial */}
+            <span className="absolute -top-1.5 left-1/2 -translate-x-1/2 text-[7px] font-bold text-slate-400">OFF</span>
+            <span className="absolute top-3 right-3 text-[7px] font-bold text-amber-500">DCV</span>
+            <span className="absolute top-10 right-1 text-[7px] font-bold text-slate-400">200</span>
+            <span className="absolute bottom-6 right-3 text-[7px] font-bold text-slate-400">500</span>
+            <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 text-[7px] font-bold text-emerald-400">OHM</span>
+            <span className="absolute bottom-6 left-3 text-[7px] font-bold text-sky-400">mA</span>
+            <span className="absolute top-10 left-1 text-[7px] font-bold text-slate-400">20</span>
+            <span className="absolute top-3 left-3 text-[7px] font-bold text-red-400">ACV</span>
+            
+            {/* Center Dial Dial Knob */}
+            <div 
+              style={{ transform: `rotate(${dialAngle}deg)` }}
+              className="w-16 h-16 bg-slate-800 border-2 border-slate-950 rounded-full shadow-md cursor-pointer transition-transform duration-300 ease-out flex items-center justify-center"
+            >
+              {/* Pointer Notch */}
+              <div className="w-1.5 h-6 bg-red-500 rounded-t-full -translate-y-4"></div>
+              {/* Center Cap */}
+              <div className="absolute w-6 h-6 bg-slate-900 rounded-full border border-slate-950 flex items-center justify-center">
+                <div className="w-2.5 h-2.5 bg-slate-800 rounded-full"></div>
+              </div>
+            </div>
+          </div>
+          
+          {/* Test Lead Jacks */}
+          <div className="flex justify-around w-full mt-2.5 border-t border-red-800 pt-2.5 px-2">
+            <div className="flex flex-col items-center">
+              <div className="w-4 h-4 bg-slate-950 rounded-full border border-slate-800 flex items-center justify-center">
+                <div className="w-1.5 h-1.5 bg-red-600 rounded-full shadow-[0_0_3px_#ef4444]"></div>
+              </div>
+              <span className="text-[6px] font-bold text-slate-300 mt-1 uppercase tracking-wider">V / Ω</span>
+            </div>
+            
+            <div className="flex flex-col items-center">
+              <div className="w-4 h-4 bg-slate-950 rounded-full border border-slate-800 flex items-center justify-center">
+                <div className="w-1.5 h-1.5 bg-slate-700 rounded-full"></div>
+              </div>
+              <span className="text-[6px] font-bold text-slate-300 mt-1 uppercase tracking-wider">COM</span>
+            </div>
+            
+            <div className="flex flex-col items-center">
+              <div className="w-4 h-4 bg-slate-950 rounded-full border border-slate-800 flex items-center justify-center">
+                <div className="w-1.5 h-1.5 bg-slate-700 rounded-full"></div>
+              </div>
+              <span className="text-[6px] font-bold text-slate-300 mt-1 uppercase tracking-wider">10A</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Keyboard Shortcuts Trigger Button */}
+      <button
+        type="button"
+        onClick={() => setShortcutsMenuOpen(true)}
+        className="absolute bottom-6 left-6 z-30 px-3 py-1.5 bg-white/90 hover:bg-white text-slate-700 hover:text-slate-900 border border-slate-100 rounded-lg shadow-lg flex items-center justify-center cursor-pointer transition select-none font-bold text-[10px]"
+        title="Keyboard Shortcuts Cheatsheet (?)"
+      >
+        <span>⌨️ SHORTCUTS</span>
+      </button>
+
+      {/* Command Palette Modal (Ctrl+P / Cmd+P) */}
+      {commandPaletteOpen && (
+        <div className="absolute inset-0 bg-slate-950/40 backdrop-blur-sm z-50 flex items-start justify-center pt-24 font-sans select-none pointer-events-auto">
+          <div 
+            className="w-full max-w-lg bg-slate-900/95 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in fade-in slide-in-from-top-8 duration-255"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="p-3.5 border-b border-slate-800 flex items-center gap-3">
+              <span className="text-slate-400 text-sm">🔍</span>
+              <input
+                type="text"
+                autoFocus
+                placeholder="Type a command or search actions..."
+                value={paletteSearchQuery}
+                onChange={(e) => { setPaletteSearchQuery(e.target.value); setPaletteSelectedIndex(0); }}
+                onKeyDown={handlePaletteKeyDown}
+                className="flex-1 bg-transparent text-white border-none outline-none focus:ring-0 text-xs leading-none"
+              />
+              <span className="text-[9px] text-slate-500 font-mono bg-slate-800/80 px-1.5 py-0.5 rounded">ESC to close</span>
+            </div>
+            <div className="max-h-72 overflow-y-auto p-1.5">
+              {filteredCommands.length === 0 ? (
+                <div className="p-4 text-xs text-slate-500 text-center italic">No matching commands found</div>
+              ) : (
+                filteredCommands.map((cmd, idx) => (
+                  <div
+                    key={idx}
+                    onClick={() => { cmd.action(); setCommandPaletteOpen(false); }}
+                    className={`p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-xs font-semibold transition ${
+                      idx === paletteSelectedIndex 
+                        ? 'bg-indigo-600 text-white shadow-sm' 
+                        : 'text-slate-300 hover:bg-slate-850'
+                    }`}
+                  >
+                    <span>{cmd.name}</span>
+                    <span className={`font-mono text-[9px] px-1.5 py-0.5 rounded leading-none ${
+                      idx === paletteSelectedIndex 
+                        ? 'bg-indigo-500 text-white/90' 
+                        : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      {cmd.shortcut}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Keyboard Shortcuts Cheatsheet Modal */}
+      {shortcutsMenuOpen && (
+        <div className="absolute inset-0 bg-slate-950/40 backdrop-blur-sm z-50 flex items-center justify-center font-sans select-none pointer-events-auto">
+          <div 
+            className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-5 flex flex-col relative animate-in fade-in zoom-in-95 duration-150"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <button 
+              type="button"
+              onClick={() => setShortcutsMenuOpen(false)}
+              className="absolute top-4 right-4 text-slate-500 hover:text-white text-xs cursor-pointer transition font-mono bg-transparent border-none"
+            >
+              ✕
+            </button>
+            <h3 className="text-white text-xs font-bold uppercase tracking-wider mb-4 pb-2 border-b border-slate-800 flex items-center gap-1.5">
+              <span>⌨️</span> Keyboard Shortcuts & Commands
+            </h3>
+            <div className="space-y-3 overflow-y-auto max-h-96 pr-1">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                <div className="text-slate-400 font-semibold uppercase tracking-wider col-span-2 text-[9px] border-b border-slate-800/40 pb-1 mt-1">Tools Belt</div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Select Tool</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">V</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Pan Canvas</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">H</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Route Wire</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">W</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Add Text Label</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">T</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Add Box Shape</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">S</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Ruler Tool</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">M</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Eraser Tool</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">E</span></div>
+
+                <div className="text-slate-400 font-semibold uppercase tracking-wider col-span-2 text-[9px] border-b border-slate-800/40 pb-1 mt-2">Actions / Navigation</div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Command Palette</span><span className="font-mono text-[10px] text-indigo-400 bg-indigo-950/60 border border-indigo-900/50 px-1.5 py-0.5 rounded">⌘ P / Ctrl+P</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Undo Edit</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">⌘ Z / Ctrl+Z</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Redo Edit</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">⌘⇧Z / Ctrl+⇧+Z</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Copy Element</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">⌘ C / Ctrl+C</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Paste Element</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">⌘ V / Ctrl+V</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Delete Selected</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">Del / Backspace</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Pan Canvas</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">Arrow Keys</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Spacebar Pan</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">Space + Drag</span></div>
+                <div className="flex justify-between border-b border-slate-800/35 pb-1"><span className="text-slate-300">Zoom Canvas</span><span className="font-mono text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">Mouse Wheel</span></div>
+              </div>
+            </div>
+            <div className="mt-4 pt-3 border-t border-slate-800 text-[9px] text-slate-500 text-center">
+              Supports macOS (⌘/Cmd), Windows (Ctrl), and Linux (Ctrl) keyboard layouts.
             </div>
           </div>
         </div>

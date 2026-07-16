@@ -133,7 +133,7 @@ export default function SidebarJlcpcb({ components = [], customPcbTraces = [] })
   return (
     <div className="h-full flex flex-col bg-slate-50/70 overflow-y-auto">
       {/* JLC Balance Panel */}
-      <div className="p-4 border-b border-slate-200 bg-white/50 backdrop-blur-xs">
+      <div className="p-4 border-b border-slate-100 bg-white/50 backdrop-blur-xs">
         <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2.5 flex items-center">
           <Landmark size={12} className="mr-1 text-slate-500" /> JLC Balance & Account
         </h3>
@@ -173,11 +173,11 @@ export default function SidebarJlcpcb({ components = [], customPcbTraces = [] })
       <div className="flex-1 p-4 bg-white/20 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">PCB Prototype Quotation</h3>
-          <span className="text-[9px] font-mono text-slate-500 font-semibold bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">JLCAPI v1</span>
+          <span className="text-[9px] font-mono text-slate-500 font-semibold bg-slate-100 px-1.5 py-0.5 rounded border border-slate-100">JLCAPI v1</span>
         </div>
 
         {/* Board dimensions calculated from active canvas */}
-        <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-2 shadow-2xs">
+        <div className="bg-white border border-slate-100 rounded-xl p-3.5 space-y-2 shadow-2xs">
           <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Calculated Board Size</span>
           <div className="flex items-baseline space-x-2">
             <span className="text-lg font-bold text-slate-800 font-mono">{widthMm} <span className="text-xs font-normal text-slate-500">mm</span></span>
@@ -198,7 +198,7 @@ export default function SidebarJlcpcb({ components = [], customPcbTraces = [] })
               <select
                 value={layers}
                 onChange={(e) => setLayers(Number(e.target.value))}
-                className="w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2 outline-none focus:border-amber-500 transition cursor-pointer"
+                className="w-full bg-white border border-slate-100 rounded-lg py-1.5 px-2 outline-none focus:border-amber-500 transition cursor-pointer"
               >
                 <option value={2}>2 Layers (FR-4)</option>
                 <option value={4}>4 Layers (FR-4)</option>
@@ -210,7 +210,7 @@ export default function SidebarJlcpcb({ components = [], customPcbTraces = [] })
               <select
                 value={quantity}
                 onChange={(e) => setQuantity(Number(e.target.value))}
-                className="w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2 outline-none focus:border-amber-500 transition cursor-pointer"
+                className="w-full bg-white border border-slate-100 rounded-lg py-1.5 px-2 outline-none focus:border-amber-500 transition cursor-pointer"
               >
                 <option value={5}>5 Pcs</option>
                 <option value={10}>10 Pcs</option>
@@ -227,7 +227,7 @@ export default function SidebarJlcpcb({ components = [], customPcbTraces = [] })
               <select
                 value={color}
                 onChange={(e) => setColor(e.target.value)}
-                className="w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2 outline-none focus:border-amber-500 transition cursor-pointer"
+                className="w-full bg-white border border-slate-100 rounded-lg py-1.5 px-2 outline-none focus:border-amber-500 transition cursor-pointer"
               >
                 <option value="Green">Green (Standard)</option>
                 <option value="Red">Red</option>
@@ -243,7 +243,7 @@ export default function SidebarJlcpcb({ components = [], customPcbTraces = [] })
               <select
                 value={copper}
                 onChange={(e) => setCopper(Number(e.target.value))}
-                className="w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2 outline-none focus:border-amber-500 transition cursor-pointer"
+                className="w-full bg-white border border-slate-100 rounded-lg py-1.5 px-2 outline-none focus:border-amber-500 transition cursor-pointer"
               >
                 <option value={1}>1 oz (Standard)</option>
                 <option value={2}>2 oz (Premium)</option>
@@ -254,12 +254,12 @@ export default function SidebarJlcpcb({ components = [], customPcbTraces = [] })
 
         {/* Quotation Details */}
         {loading ? (
-          <div className="h-36 bg-white border border-slate-200 rounded-xl flex items-center justify-center">
+          <div className="h-36 bg-white border border-slate-100 rounded-xl flex items-center justify-center">
             <RefreshCw className="animate-spin text-amber-500" size={18} />
           </div>
         ) : (
           quote && (
-            <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-2.5 shadow-2xs">
+            <div className="bg-white border border-slate-100 rounded-xl p-3.5 space-y-2.5 shadow-2xs">
               <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider block">Price Breakdown</span>
               <div className="space-y-1.5 text-xs text-slate-650 font-sans border-b border-slate-100 pb-2">
                 <div className="flex justify-between">

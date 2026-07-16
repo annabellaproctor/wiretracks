@@ -715,6 +715,9 @@ function easyeda2kicadPlugin(env) {
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
+  console.log("VITE_OPENROUTER_API_KEY from loadEnv:", env.VITE_OPENROUTER_API_KEY ? "EXISTS (length " + env.VITE_OPENROUTER_API_KEY.length + ")" : "MISSING");
+  console.log("VITE_GEMINI_FALLBACK_API_KEY from loadEnv:", env.VITE_GEMINI_FALLBACK_API_KEY ? "EXISTS" : "MISSING");
+  console.log("VITE_GEMINI_FAgreLLBACK_API_KEY from loadEnv:", env.VITE_GEMINI_FAgreLLBACK_API_KEY ? "EXISTS" : "MISSING");
   return {
     plugins: [react(), easyeda2kicadPlugin(env)],
   };

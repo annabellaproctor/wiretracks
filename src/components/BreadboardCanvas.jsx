@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 
-export default function BreadboardCanvas({ components, traces }) {
+export default function BreadboardCanvas({ components, setComponents, traces }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   
@@ -94,66 +94,138 @@ export default function BreadboardCanvas({ components, traces }) {
     setIsPanning(false);
   };
 
+  const runBreadboardAutopositioner = () => {
+    const mainComps = [];
+    const passiveComps = [];
+
+    components.forEach(c => {
+      if (c.type === 'mcu' || c.type === 'gate' || c.type === 'relay' || c.type === 'regulator') {
+        mainComps.push(c);
+      } else {
+        passiveComps.push(c);
+      }
+    });
+
+    let currentCol = 6;
+
+    const positioned = components.map(c => {
+      let col = c.breadboardCol;
+      
+      if (mainComps.some(mc => mc.id === c.id)) {
+        col = currentCol;
+        const width = c.type === 'mcu' ? 16 : (c.type === 'gate' ? 6 : (c.type === 'relay' ? 5 : 4));
+        currentCol += width + 2;
+      } else {
+        col = currentCol;
+        currentCol += 6;
+      }
+
+      col = Math.max(1, Math.min(55, col));
+
+      return {
+        ...c,
+        breadboardCol: col
+      };
+    });
+
+    if (setComponents) {
+      setComponents(positioned);
+    }
+  };
+
   const getBreadboardFootprint = (comp) => {
+    const baseCol = comp.breadboardCol !== undefined ? comp.breadboardCol : 10;
     switch (comp.type) {
       case 'mcu':
         return {
-          col: 15,
+          col: baseCol,
           rowOffset: 0,
           widthCols: 15,
           pins: [
-            { name: '5V', col: 15, row: 'A' },
-            { name: '3V3', col: 16, row: 'A' },
-            { name: 'GND', col: 24, row: 'A' },
-            { name: 'IO2', col: 18, row: 'J' },
-            { name: 'IO4', col: 19, row: 'J' },
-            { name: 'RX2', col: 22, row: 'J' },
-            { name: 'TX2', col: 23, row: 'J' }
+            { name: '5V', col: baseCol, row: 'A' },
+            { name: '3V3', col: baseCol + 1, row: 'A' },
+            { name: 'GND', col: baseCol + 9, row: 'A' },
+            { name: 'IO2', col: baseCol + 3, row: 'J' },
+            { name: 'IO4', col: baseCol + 4, row: 'J' },
+            { name: 'RX2', col: baseCol + 7, row: 'J' },
+            { name: 'TX2', col: baseCol + 8, row: 'J' }
           ]
         };
       case 'regulator':
         return {
-          col: 6,
+          col: baseCol,
           rowOffset: 0,
           widthCols: 3,
           pins: [
-            { name: 'IN', col: 6, row: 'C' },
-            { name: 'GND', col: 7, row: 'C' },
-            { name: 'OUT', col: 8, row: 'C' }
+            { name: 'IN', col: baseCol, row: 'C' },
+            { name: 'GND', col: baseCol + 1, row: 'C' },
+            { name: 'OUT', col: baseCol + 2, row: 'C' }
           ]
         };
       case 'resistor':
-        const startCol = comp.name.includes('1') ? 35 : 42;
         return {
-          col: startCol,
+          col: baseCol,
           pins: [
-            { name: '1', col: startCol, row: 'C' },
-            { name: '2', col: startCol + 5, row: 'C' }
+            { name: '1', col: baseCol, row: 'C' },
+            { name: '2', col: baseCol + 5, row: 'C' }
           ]
         };
       case 'capacitor':
-        const capCol = comp.name.includes('1') ? 5 : 10;
         return {
-          col: capCol,
+          col: baseCol,
           pins: [
-            { name: '1', col: capCol, row: 'B' },
-            { name: '2', col: capCol, row: 'E' }
+            { name: '1', col: baseCol, row: 'B' },
+            { name: '2', col: baseCol, row: 'E' }
           ]
         };
       case 'led':
         return {
-          col: 40,
+          col: baseCol,
           pins: [
-            { name: 'A', col: 40, row: 'D' }, 
-            { name: 'K', col: 40, row: 'E' }  
+            { name: 'A', col: baseCol, row: 'D' }, 
+            { name: 'K', col: baseCol, row: 'E' }  
+          ]
+        };
+      case 'switch':
+        return {
+          col: baseCol,
+          pins: [
+            { name: '1', col: baseCol, row: 'C' },
+            { name: '2', col: baseCol + 2, row: 'C' }
+          ]
+        };
+      case 'relay':
+        return {
+          col: baseCol,
+          pins: [
+            { name: 'COIL1', col: baseCol, row: 'B' },
+            { name: 'COIL2', col: baseCol, row: 'D' },
+            { name: 'COM', col: baseCol + 3, row: 'B' },
+            { name: 'NO', col: baseCol + 3, row: 'C' },
+            { name: 'NC', col: baseCol + 3, row: 'D' }
+          ]
+        };
+      case 'gate':
+        return {
+          col: baseCol,
+          pins: [
+            { name: 'A', col: baseCol, row: 'A' },
+            { name: 'B', col: baseCol + 1, row: 'A' },
+            { name: 'OUT', col: baseCol + 2, row: 'A' },
+            { name: 'VCC', col: baseCol + 3, row: 'A' },
+            { name: 'GND', col: baseCol + 4, row: 'A' }
           ]
         };
       default:
+        // Generic 2-pin component (e.g. diodes, potentiometer wiper, etc.)
+        const hasK = comp.pins && comp.pins.some(p => p.name === 'K');
+        const pin1Name = hasK ? 'A' : (comp.pins && comp.pins[0] ? comp.pins[0].name : '1');
+        const pin2Name = hasK ? 'K' : (comp.pins && comp.pins[1] ? comp.pins[1].name : '2');
         return {
-          col: 30,
+          col: baseCol,
           pins: [
-            { name: '1', col: 30, row: 'C' },
-            { name: '2', col: 31, row: 'C' }
+            { name: pin1Name, col: baseCol, row: 'C' },
+            { name: pin2Name, col: baseCol + 1, row: 'C' }
           ]
         };
     }
@@ -539,9 +611,21 @@ export default function BreadboardCanvas({ components, traces }) {
 
   return (
     <div ref={containerRef} className="relative w-full h-full bg-slate-100 flex flex-col items-center justify-center overflow-hidden">
-      <div className="absolute top-3 left-3 z-10 bg-white/95 backdrop-blur border border-slate-200 px-3 py-1.5 rounded-lg shadow-sm">
+      <div className="absolute top-3 left-3 z-10 bg-white/95 backdrop-blur border border-slate-100/60 px-3 py-1.5 rounded-lg shadow-sm">
         <span className="text-xs font-semibold text-slate-500 mr-2">PROTOTYPE:</span>
         <span className="text-xs text-slate-700">Breadboard Jumper Routing View</span>
+      </div>
+
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 bg-slate-900/90 border border-slate-800 px-4 py-2.5 rounded-xl shadow-lg flex items-center space-x-3 text-white pointer-events-auto select-none font-sans">
+        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">🛠 Breadboard Tools</span>
+        <span className="h-4 w-px bg-slate-700"></span>
+        <button
+          onClick={runBreadboardAutopositioner}
+          className="text-indigo-400 hover:text-indigo-300 text-[10px] font-bold transition flex items-center cursor-pointer animate-pulse"
+          title="Auto-position components on the breadboard and route jumper wires"
+        >
+          ⚡ Auto-Position & Route
+        </button>
       </div>
 
       <canvas
@@ -552,7 +636,7 @@ export default function BreadboardCanvas({ components, traces }) {
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        className="w-full h-full cursor-grab active:cursor-grabbing"
+        className="w-full h-full cursor-grab active:cursor-grabbing animate-in fade-in"
       />
     </div>
   );

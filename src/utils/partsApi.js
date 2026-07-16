@@ -305,6 +305,29 @@ export async function searchGoogleMerchantAPI(query) {
   }
 }
 
+export async function searchPartcountInventory(query) {
+  try {
+    const partcountHost = (import.meta.env.VITE_PARTCOUNT_HOST || 'http://192.168.1.4:8000').replace(/\/$/, '');
+    const response = await fetch(`${partcountHost}/api/components/?q=${encodeURIComponent(query)}`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.map(item => ({
+      mfr: 'Local Inventory',
+      partNumber: item.barcode_id,
+      description: `${item.name || ''} ${item.short_title || ''}`.trim() || 'No description',
+      package: item.package || 'Unknown',
+      price: '$0.00',
+      stock: 'In Stock',
+      datasheet: '',
+      category: item.type_path || 'general',
+      image: item.image_path ? `${partcountHost}${item.image_path}` : null,
+      source: 'Partcount'
+    }));
+  } catch (err) {
+    return [];
+  }
+}
+
 // Unified orchestrator with caching and provider routing
 export async function searchPartsUnified(query, provider = 'all') {
   const cacheKey = `${provider}_${query}`;
@@ -312,6 +335,23 @@ export async function searchPartsUnified(query, provider = 'all') {
   if (cached) return cached;
 
   const results = [];
+
+  if (provider === 'partcount') {
+    const localResults = await searchPartcountInventory(query);
+    setCachedResult(cacheKey, localResults);
+    return localResults;
+  }
+
+  if (provider === 'all') {
+    try {
+      const localResults = await searchPartcountInventory(query);
+      if (localResults && localResults.length > 0) {
+        results.push(...localResults);
+      }
+    } catch (e) {
+      console.warn("Partcount local search failed:", e);
+    }
+  }
   const serpapiKey = import.meta.env.VITE_SERPAPI_API_KEY;
   const dataforseoLogin = import.meta.env.VITE_DATAFORSEO_LOGIN;
   const googleMerchantId = import.meta.env.VITE_GOOGLE_MERCHANT_ID;

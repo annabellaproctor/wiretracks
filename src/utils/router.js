@@ -3,8 +3,8 @@
  * Calculates neat vertical and horizontal paths between points while avoiding obstacles.
  */
 
-const GRID_COLS = 80;
-const GRID_ROWS = 60;
+const GRID_COLS = 200;
+const GRID_ROWS = 150;
 
 /**
  * Calculates an orthogonal route from start to end grid coordinates, avoiding component obstacles.
@@ -16,7 +16,18 @@ const GRID_ROWS = 60;
  * @param {number} gridSize - Grid cell size in pixels (default 15)
  * @returns {Array} List of grid points [{x, y}, ...] representing the path
  */
-export function findOrthogonalPath(start, end, components = [], traces = [], gridSize = 15) {
+export function findOrthogonalPath(start, end, components = [], traces = [], gridSize = 15, startCompId = null, endCompId = null, startDir = null, endDir = null) {
+  const getDirDelta = (dir) => {
+    if (dir === 'left') return { dx: -1, dy: 0 };
+    if (dir === 'right') return { dx: 1, dy: 0 };
+    if (dir === 'up') return { dx: 0, dy: -1 };
+    if (dir === 'down') return { dx: 0, dy: 1 };
+    return null;
+  };
+
+  const startDirDelta = getDirDelta(startDir);
+  const endDirDelta = getDirDelta(endDir);
+
   const startGrid = {
     x: Math.round(start.x / gridSize),
     y: Math.round(start.y / gridSize)
@@ -77,12 +88,56 @@ export function findOrthogonalPath(start, end, components = [], traces = [], gri
     if ((x === startGrid.x && y === startGrid.y) || (x === endGrid.x && y === endGrid.y)) {
       return false;
     }
-    for (const box of componentBoxes) {
-      if (x >= box.x1 && x <= box.x2 && y >= box.y1 && y <= box.y2) {
+    for (const c of components) {
+      if (c.id === startCompId || c.id === endCompId) {
+        continue; // Exclude start/end components from hard blocking so they can connect
+      }
+
+      const cx = Math.round(c.x / gridSize);
+      const cy = Math.round(c.y / gridSize);
+      const cw = Math.round(c.width / gridSize);
+      const ch = Math.round(c.height / gridSize);
+      
+      // Hard block the actual physical body interior of other components
+      if (x >= cx && x < cx + cw && y >= cy && y < cy + ch) {
         return true;
       }
     }
     return false;
+  };
+
+  // Helper to check if a grid point falls inside any component body/margin and apply cost
+  const getBodyPenalty = (x, y) => {
+    if ((x === startGrid.x && y === startGrid.y) || (x === endGrid.x && y === endGrid.y)) {
+      return 0;
+    }
+    for (const c of components) {
+      const cx = Math.round(c.x / gridSize);
+      const cy = Math.round(c.y / gridSize);
+      const cw = Math.round(c.width / gridSize);
+      const ch = Math.round(c.height / gridSize);
+      
+      // 1. Interior actual physical body check
+      if (x >= cx && x < cx + cw && y >= cy && y < cy + ch) {
+        if (c.id === startCompId || c.id === endCompId) {
+          return 3000; // High soft penalty for start/end component interior
+        }
+        return 10000; // Hard-blocked in isInsideComponent anyway, but keep for safety
+      }
+
+      // 2. Outer padded boundary check (adds soft cost to keep trace spacing from component edges)
+      const x1 = cx - 1;
+      const y1 = cy - 1;
+      const x2 = cx + cw;
+      const y2 = cy + ch;
+      if (x >= x1 && x <= x2 && y >= y1 && y <= y2) {
+        if (c.id === startCompId || c.id === endCompId) {
+          continue; // Exclude start/end components from padding penalty to allow clean pin escapes
+        }
+        return 150; // Moderate soft penalty to keep distance from other components if possible
+      }
+    }
+    return 0;
   };
 
   // Helper to check if a point sits on an existing trace segment
@@ -97,11 +152,11 @@ export function findOrthogonalPath(start, end, components = [], traces = [], gri
       // Is point on the segment
       if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
         if (seg.isLocked) {
-          // HUGE penalty for crossing/overlapping a locked "in stone" wire
-          penalty += 80;
+          // EXTREMELY high penalty to prevent sharing/crossing locked lines
+          penalty += 250;
         } else {
-          // Medium penalty for crossing normal wires
-          penalty += 15;
+          // High penalty to force A* to route around other wires instead of overlapping
+          penalty += 150;
         }
       }
     }
@@ -130,7 +185,7 @@ export function findOrthogonalPath(start, end, components = [], traces = [], gri
   });
 
   let found = false;
-  let maxIterations = 2000; // safety ceiling
+  let maxIterations = 8000; // safety ceiling for larger grid
   let iterations = 0;
 
   while (openSet.length > 0 && iterations < maxIterations) {
@@ -148,12 +203,17 @@ export function findOrthogonalPath(start, end, components = [], traces = [], gri
     closedSet.add(currentKey);
 
     // 4 directions
-    const dirs = [
+    let dirs = [
       { dx: 0, dy: -1 }, // Up
       { dx: 0, dy: 1 },  // Down
       { dx: -1, dy: 0 }, // Left
       { dx: 1, dy: 0 }   // Right
     ];
+
+    // Force starting cell escape direction
+    if (current.x === startGrid.x && current.y === startGrid.y && startDirDelta) {
+      dirs = [startDirDelta];
+    }
 
     for (const d of dirs) {
       const nx = current.x + d.dx;
@@ -168,6 +228,12 @@ export function findOrthogonalPath(start, end, components = [], traces = [], gri
       // Check obstacle
       if (isInsideComponent(nx, ny)) continue;
 
+      // Force entering the end pin from the correct facing direction
+      if (nx === endGrid.x && ny === endGrid.y && endDirDelta) {
+        const isEnteringCorrectly = (current.x === endGrid.x + endDirDelta.dx && current.y === endGrid.y + endDirDelta.dy);
+        if (!isEnteringCorrectly) continue;
+      }
+
       // Base step cost
       let stepCost = 1;
 
@@ -178,6 +244,7 @@ export function findOrthogonalPath(start, end, components = [], traces = [], gri
 
       // Add trace overlapping/crossing penalties
       stepCost += getTraceCost(nx, ny);
+      stepCost += getBodyPenalty(nx, ny);
 
       const tentativeGScore = gScore[currentKey] + stepCost;
 
@@ -195,7 +262,8 @@ export function findOrthogonalPath(start, end, components = [], traces = [], gri
             f: fScore[neighborKey],
             dir: d
           });
-        } else if (tentativeGScore < gScore[neighborKey]) {
+        } else {
+          // Update existing openSet item with the new lower f score and direction
           openSet[existingIdx].f = fScore[neighborKey];
           openSet[existingIdx].dir = d;
         }
@@ -214,7 +282,12 @@ export function findOrthogonalPath(start, end, components = [], traces = [], gri
     path.reverse();
     
     // Smooth the path to only contain corner nodes (reduces JSON size and simplifies drawing)
-    return smoothOrthogonalPath(path);
+    const smoothed = smoothOrthogonalPath(path);
+    if (smoothed.length > 0) {
+      smoothed[0] = { x: start.x, y: start.y };
+      smoothed[smoothed.length - 1] = { x: end.x, y: end.y };
+    }
+    return smoothed;
   }
 
   // Fallback: Return a simple Manhattan L-shaped route if A* fails
