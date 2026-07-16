@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Cpu, RotateCw, Trash2, Edit2, Link } from 'lucide-react';
+import { Cpu, RotateCw, Trash2, Edit2, Link, Activity, Pause, Lightbulb, Battery, Box } from 'lucide-react';
 import { deduplicateComponents, auditDatabaseWithAI } from '../utils/componentMerger';
 import { autoHeuristicPinoutMap } from '../utils/pinoutHeuristic';
 import { sqliteDb } from '../utils/sqliteDb';
@@ -7,100 +7,34 @@ import { getBaseVoltage, getBaseCapacityOrPower, calculateCustomizerSize, getUpd
 
 function SchematicPreview({ type }) {
   if (type === 'resistor') {
-    return (
-      <svg viewBox="0 0 40 20" className="w-12 h-6 stroke-slate-500 fill-none" strokeWidth="1.5">
-        <path d="M 0 10 L 10 10 L 12 5 L 16 15 L 20 5 L 24 15 L 28 5 L 30 10 L 40 10" />
-      </svg>
-    );
+    return <Activity className="w-12 h-6 text-slate-500" strokeWidth={1.5} />;
   }
   if (type === 'capacitor') {
-    return (
-      <svg viewBox="0 0 40 20" className="w-12 h-6 stroke-slate-500 fill-none" strokeWidth="1.5">
-        <path d="M 0 10 L 16 10 M 16 4 L 16 16 M 24 4 L 24 16 M 24 10 L 40 10" />
-      </svg>
-    );
+    return <Pause className="w-12 h-6 text-slate-500" strokeWidth={1.5} />;
   }
   if (type === 'led') {
-    return (
-      <svg viewBox="0 0 40 20" className="w-12 h-6 stroke-slate-500 fill-none" strokeWidth="1.5">
-        <path d="M 0 10 L 14 10 M 14 4 L 24 10 L 14 16 Z M 24 4 L 24 16 M 24 10 L 40 10" />
-        <path d="M 16 -1 L 12 -5 M 13 -5 L 12 -5 L 12 -4 M 21 -1 L 17 -5 M 18 -5 L 17 -5 L 17 -4" strokeWidth="1" />
-      </svg>
-    );
+    return <Lightbulb className="w-12 h-6 text-slate-500" strokeWidth={1.5} />;
   }
   if (type === 'regulator') {
-    return (
-      <svg viewBox="0 0 40 20" className="w-12 h-6 stroke-slate-500 fill-none" strokeWidth="1.5">
-        <rect x="12" y="3" width="16" height="14" rx="1" />
-        <path d="M 0 10 L 12 10 M 28 10 L 40 10 M 20 17 L 20 20" />
-      </svg>
-    );
+    return <Battery className="w-12 h-6 text-slate-500" strokeWidth={1.5} />;
   }
-  return (
-    <svg viewBox="0 0 40 20" className="w-12 h-6 stroke-slate-500 fill-none" strokeWidth="1.5">
-      <rect x="10" y="2" width="20" height="16" rx="2" />
-      <path d="M 5 6 L 10 6 M 5 10 L 10 10 M 5 14 L 10 14" />
-      <path d="M 30 6 L 35 6 M 30 10 L 35 10 M 30 14 L 35 14" />
-    </svg>
-  );
+  return <Cpu className="w-12 h-6 text-slate-500" strokeWidth={1.5} />;
 }
 
 function PhysicalPreview({ type }) {
   if (type === 'resistor') {
-    return (
-      <svg viewBox="0 0 40 20" className="w-12 h-6">
-        <line x1="0" y1="10" x2="40" y2="10" stroke="#cbd5e1" strokeWidth="1.5" />
-        <rect x="10" y="6" width="20" height="8" rx="2" fill="#f8fafc" stroke="#94a3b8" strokeWidth="1" />
-        <rect x="13" y="6" width="2" height="8" fill="#78350f" />
-        <rect x="17" y="6" width="2" height="8" fill="#000000" />
-        <rect x="21" y="6" width="2" height="8" fill="#ea580c" />
-        <rect x="25" y="6" width="2" height="8" fill="#d97706" />
-      </svg>
-    );
+    return <Activity className="w-12 h-6 text-slate-400" strokeWidth={2} />;
   }
   if (type === 'capacitor') {
-    return (
-      <svg viewBox="0 0 40 20" className="w-12 h-6">
-        <line x1="17" y1="10" x2="17" y2="20" stroke="#cbd5e1" strokeWidth="1.5" />
-        <line x1="23" y1="10" x2="23" y2="20" stroke="#cbd5e1" strokeWidth="1.5" />
-        <circle cx="20" cy="10" r="7" fill="#fbbf24" stroke="#d97706" strokeWidth="1" />
-        <text x="20" y="12" fontFamily="monospace" fontSize="6" fontWeight="bold" fill="#78350f" textAnchor="middle">104</text>
-      </svg>
-    );
+    return <Pause className="w-12 h-6 text-amber-500" strokeWidth={2} />;
   }
   if (type === 'led') {
-    return (
-      <svg viewBox="0 0 40 20" className="w-12 h-6">
-        <line x1="18" y1="12" x2="18" y2="20" stroke="#cbd5e1" strokeWidth="1.5" />
-        <line x1="22" y1="12" x2="22" y2="20" stroke="#cbd5e1" strokeWidth="1.5" />
-        <path d="M 16 12 L 16 7 A 4 4 0 0 1 24 7 L 24 12 Z" fill="rgba(239, 68, 68, 0.85)" stroke="#dc2626" strokeWidth="1" />
-        <rect x="15" y="11" width="10" height="1.5" rx="0.5" fill="#ef4444" />
-        <path d="M 19 11 L 19 8 L 20 8 M 21 11 L 21 9 L 20 9" stroke="#cbd5e1" strokeWidth="0.8" fill="none" />
-      </svg>
-    );
+    return <Lightbulb className="w-12 h-6 text-red-500" strokeWidth={2} />;
   }
   if (type === 'regulator') {
-    return (
-      <svg viewBox="0 0 40 20" className="w-12 h-6">
-        <line x1="16" y1="12" x2="16" y2="20" stroke="#cbd5e1" strokeWidth="1.2" />
-        <line x1="20" y1="12" x2="20" y2="20" stroke="#cbd5e1" strokeWidth="1.2" />
-        <line x1="24" y1="12" x2="24" y2="20" stroke="#cbd5e1" strokeWidth="1.2" />
-        <rect x="15" y="1" width="10" height="4" fill="#94a3b8" rx="0.5" />
-        <circle cx="20" cy="3" r="1" fill="#fff" />
-        <rect x="14" y="5" width="12" height="8" fill="#1e293b" rx="1" />
-      </svg>
-    );
+    return <Battery className="w-12 h-6 text-slate-600" strokeWidth={2} />;
   }
-  return (
-    <svg viewBox="0 0 40 20" className="w-12 h-6">
-      <rect x="6" y="2" width="28" height="16" rx="1.5" fill="#111" />
-      <rect x="6" y="3" width="1" height="14" fill="#d97706" />
-      <rect x="33" y="3" width="1" height="14" fill="#d97706" />
-      <rect x="13" y="5" width="14" height="10" rx="1" fill="#cbd5e1" stroke="#64748b" strokeWidth="0.8" />
-      <rect x="29" y="4" width="3" height="12" fill="#fbbf24" />
-      <path d="M 29 4 L 32 4 L 32 6 L 29 6 L 29 8 L 32 8" stroke="#d97706" strokeWidth="0.8" fill="none" />
-    </svg>
-  );
+  return <Cpu className="w-12 h-6 text-slate-800" strokeWidth={2} />;
 }
 
 export default function SidebarLibrary({
